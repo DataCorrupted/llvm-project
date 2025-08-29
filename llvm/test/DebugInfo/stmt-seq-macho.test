@@ -1,0 +1,61 @@
+## Test that verifies DW_AT_LLVM_stmt_sequence attributes are correctly patched in the dSYM
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+
+# RUN: clang --target=arm64-apple-macos11 \
+# RUN:  -c -Oz -g\
+# RUN:  -fdebug-compilation-dir=/private/tmp/stmt_seq \
+# RUN:  -gdwarf-4 \
+# RUN:  -fno-unwind-tables \
+# RUN:  -mllvm -emit-func-debug-line-table-offsets \
+# RUN:  -fno-exceptions -mno-outline \
+# RUN:  %t/stmt_seq_macho.cpp \
+# RUN:  -o %t/stmt_seq_macho.o
+
+# RUN: llvm-dwarfdump --debug-info --debug-line -v stmt_seq_macho.o 
+
+# CHECK:                  Address            Line   Column File   ISA Discriminator OpIndex Flags
+# CHECK-NEXT:             ------------------ ------ ------ ------ --- ------------- ------- -------------
+# CHECK-NEXT: 0x0000008b: 05 DW_LNS_set_column (12)
+# CHECK-NEXT: 0x0000008d: 0a DW_LNS_set_prologue_end
+# CHECK-NEXT: 0x0000008e: 00 DW_LNE_set_address (0x0000000000000000)
+# CHECK-NEXT: 0x00000099: 13 address += 0,  line += 1,  op-index += 0
+# CHECK-NEXT:             0x0000000000000000      2     12      1   0             0       0  is_stmt prologue_end
+# CHECK-NEXT: 0x0000009a: 00 DW_LNE_end_sequence
+# CHECK-NEXT:             0x0000000000000000      2     12      1   0             0       0  is_stmt end_sequence
+# CHECK-NEXT: 0x0000009d: 05 DW_LNS_set_column (12)
+# CHECK-NEXT: 0x0000009f: 0a DW_LNS_set_prologue_end
+# CHECK-NEXT: 0x000000a0: 00 DW_LNE_set_address (0x0000000000000004)
+# CHECK-NEXT: 0x000000ab: 14 address += 0,  line += 2,  op-index += 0
+# CHECK-NEXT:             0x0000000000000004      3     12      1   0             0       0  is_stmt prologue_end
+# CHECK-NEXT: 0x000000ac: 00 DW_LNE_end_sequence
+# CHECK-NEXT:             0x0000000000000004      3     12      1   0             0       0  is_stmt end_sequence
+# CHECK-NEXT: 0x000000af: 05 DW_LNS_set_column (12)
+# CHECK-NEXT: 0x000000b1: 0a DW_LNS_set_prologue_end
+# CHECK-NEXT: 0x000000b2: 00 DW_LNE_set_address (0x0000000000000008)
+# CHECK-NEXT: 0x000000bd: 15 address += 0,  line += 3,  op-index += 0
+# CHECK-NEXT:             0x0000000000000008      4     12      1   0             0       0  is_stmt prologue_end
+# CHECK-NEXT: 0x000000be: 00 DW_LNE_end_sequence
+# CHECK-NEXT:             0x0000000000000008      4     12      1   0             0       0  is_stmt end_sequence
+# CHECK-NEXT: 0x000000c1: 05 DW_LNS_set_column (5)
+# CHECK-NEXT: 0x000000c3: 0a DW_LNS_set_prologue_end
+# CHECK-NEXT: 0x000000c4: 00 DW_LNE_set_address (0x000000000000000c)
+# CHECK-NEXT: 0x000000cf: 03 DW_LNS_advance_line (10)
+# CHECK-NEXT: 0x000000d1: 01 DW_LNS_copy
+# CHECK-NEXT:             0x000000000000000c     10      5      1   0             0       0  is_stmt prologue_end
+# CHECK-NEXT: 0x000000d2: 02 DW_LNS_advance_pc (addr += 8, op-index += 0)
+# CHECK-NEXT: 0x000000d4: 00 DW_LNE_end_sequence
+# CHECK-NEXT:             0x0000000000000014     10      5      1   0             0       0  is_stmt end_sequence
+
+#--- stmt_seq_macho.cpp
+
+void f1() {}
+void f2() {}
+void f3() {}
+
+int main() {
+    f1();
+    f2();
+    f3();
+    return 0;
+}
