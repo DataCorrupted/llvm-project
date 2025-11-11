@@ -37,6 +37,7 @@ CODEGENOPT(AssumeUniqueVTables , 1, 1, Benign) ///< Assume a class has only one 
 CODEGENOPT(Autolink          , 1, 1, Benign) ///< -fno-autolink
 CODEGENOPT(AutoImport        , 1, 1, Benign) ///< -fno-auto-import
 CODEGENOPT(ObjCAutoRefCountExceptions , 1, 0, Benign) ///< Whether ARC should be EH-safe.
+CODEGENOPT(ObjCNilCheckThunk , 1, 0, Benign) ///< Generate nil-check thunks for objc_direct methods at call sites.
 CODEGENOPT(Backchain         , 1, 0, Benign) ///< -mbackchain
 CODEGENOPT(ControlFlowGuardNoChecks  , 1, 0, Benign) ///< -cfguard-no-checks
 CODEGENOPT(ControlFlowGuard  , 1, 0, Benign) ///< -cfguard

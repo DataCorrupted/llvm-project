@@ -3682,6 +3682,11 @@ defm objc_arc_exceptions : BoolFOption<"objc-arc-exceptions",
   PosFlag<SetTrue, [], [ClangOption, CC1Option],
           "Use EH-safe code when synthesizing retains and releases in -fobjc-arc">,
   NegFlag<SetFalse>>;
+defm objc_nil_check_thunk : BoolFOption<"objc-nil-check-thunk",
+  CodeGenOpts<"ObjCNilCheckThunk">, DefaultFalse,
+  PosFlag<SetTrue, [], [ClangOption, CC1Option],
+          "Generate nil-check thunks for objc_direct methods at call sites instead of in the implementation">,
+  NegFlag<SetFalse>>;
 def fobjc_atdefs : Flag<["-"], "fobjc-atdefs">, Group<clang_ignored_f_Group>;
 def fobjc_call_cxx_cdtors : Flag<["-"], "fobjc-call-cxx-cdtors">, Group<clang_ignored_f_Group>;
 defm objc_exceptions : BoolFOption<"objc-exceptions",
