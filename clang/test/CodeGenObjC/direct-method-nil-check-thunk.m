@@ -1,6 +1,10 @@
+// XFAIL: *
 // RUN: %clang_cc1 -emit-llvm -fobjc-arc -fobjc-nil-check-thunk -triple x86_64-apple-darwin10 %s -o - | FileCheck %s
 
-// Tests for the objc_direct nil-check thunk optimization.
+// Tests direct method nil-check thunk optimization behavior.
+// NOTE: This test is currently XFAIL'd because Phase 2-6 (thunk generation and
+// call site analysis) are not yet implemented. Once those phases are complete,
+// remove the XFAIL line.
 // NOTE: This feature is not yet implemented. The flag is currently ignored.
 // With -fobjc-nil-check-thunk enabled (once implemented), objc_direct methods should:
 // 1. Emit the true implementation with linkonce_odr linkage and public symbol

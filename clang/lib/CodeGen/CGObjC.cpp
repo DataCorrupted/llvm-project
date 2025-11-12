@@ -761,7 +761,10 @@ void CodeGenFunction::StartObjCMethod(const ObjCMethodDecl *OMD,
 
   const CGFunctionInfo &FI = CGM.getTypes().arrangeObjCMethodDeclaration(OMD);
   if (OMD->isDirectMethod()) {
-    Fn->setVisibility(llvm::Function::HiddenVisibility);
+    // With nil-check thunk optimization, direct methods use public linkage.
+    // Otherwise, they remain hidden.
+    if (!CGM.shouldHaveNilCheckThunk(OMD))
+      Fn->setVisibility(llvm::Function::HiddenVisibility);
     CGM.SetLLVMFunctionAttributes(OMD, FI, Fn, /*IsThunk=*/false);
     CGM.SetLLVMFunctionAttributesForDefinition(OMD, Fn);
   } else {

@@ -717,6 +717,16 @@ public:
   /// Return true iff an Objective-C runtime has been configured.
   bool hasObjCRuntime() { return !!ObjCRuntime; }
 
+  /// Check if a direct method should use the nil-check thunk optimization.
+  /// Returns true if:
+  /// - The runtime is NeXT family
+  /// - The ObjCNilCheckThunk CodeGen option is enabled
+  /// - The method itself is eligible (canHaveNilCheckThunk())
+  bool shouldHaveNilCheckThunk(const ObjCMethodDecl *OMD) const {
+    return getLangOpts().ObjCRuntime.isNeXTFamily() &&
+           getCodeGenOpts().ObjCNilCheckThunk && OMD->canHaveNilCheckThunk();
+  }
+
   const std::string &getModuleNameHash() const { return ModuleNameHash; }
 
   /// Return a reference to the configured OpenCL runtime.

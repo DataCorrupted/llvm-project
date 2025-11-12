@@ -482,6 +482,16 @@ public:
   /// True if the method is tagged as objc_direct
   bool isDirectMethod() const;
 
+  /// Check if this method can have nil-check thunk optimization.
+  /// Returns true if the method is eligible for the optimization based on
+  /// its properties (must be direct, not variadic). This does not check if the
+  /// optimization flag is enabled.
+  bool canHaveNilCheckThunk() const {
+    // Only direct methods are eligible
+    // Variadic functions are excluded from the optimization per RFC
+    return isDirectMethod() && !isVariadic();
+  }
+
   /// True if the method has a parameter that's destroyed in the callee.
   bool hasParamDestroyedInCallee() const;
 

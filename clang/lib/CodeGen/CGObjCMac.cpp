@@ -3889,9 +3889,14 @@ CGObjCCommonMac::GenerateDirectMethod(const ObjCMethodDecl *OMD,
   llvm::FunctionType *MethodTy =
       Types.GetFunctionType(Types.arrangeObjCMethodDeclaration(OMD));
 
+  // Determine linkage based on nil-check thunk optimization
+  bool UseNilCheckThunk = CGM.shouldHaveNilCheckThunk(OMD);
+  llvm::GlobalValue::LinkageTypes Linkage =
+      UseNilCheckThunk ? llvm::GlobalValue::LinkOnceODRLinkage
+                       : llvm::GlobalValue::ExternalLinkage;
+
   if (OldFn) {
-    Fn = llvm::Function::Create(MethodTy, llvm::GlobalValue::ExternalLinkage,
-                                "", &CGM.getModule());
+    Fn = llvm::Function::Create(MethodTy, Linkage, "", &CGM.getModule());
     Fn->takeName(OldFn);
     OldFn->replaceAllUsesWith(Fn);
     OldFn->eraseFromParent();
@@ -3899,10 +3904,12 @@ CGObjCCommonMac::GenerateDirectMethod(const ObjCMethodDecl *OMD,
     // Replace the cached function in the map.
     I->second = Fn;
   } else {
-    auto Name = getSymbolNameForMethod(OMD, /*include category*/ false);
+    // Generate symbol name - when nil-check thunk optimization is enabled,
+    // use public symbols without the \01 prefix
+    auto Name = getSymbolNameForMethod(OMD, /*include category*/ false,
+                                       /*includePrefixByte*/ !UseNilCheckThunk);
 
-    Fn = llvm::Function::Create(MethodTy, llvm::GlobalValue::ExternalLinkage,
-                                Name, &CGM.getModule());
+    Fn = llvm::Function::Create(MethodTy, Linkage, Name, &CGM.getModule());
     DirectMethodDefinitions.insert(std::make_pair(COMD, Fn));
   }
 
@@ -3957,7 +3964,10 @@ void CGObjCCommonMac::GenerateDirectMethodPrologue(
     ReceiverCanBeNull = isWeakLinkedClass(OID);
   }
 
-  if (ReceiverCanBeNull) {
+  // When the nil-check thunk optimization is enabled, skip nil checks in the
+  // implementation. Nil checks will be performed in thunks at call sites for
+  // nullable receivers.
+  if (ReceiverCanBeNull && !CGM.shouldHaveNilCheckThunk(OMD)) {
     llvm::BasicBlock *SelfIsNilBlock =
         CGF.createBasicBlock("objc_direct_method.self_is_nil");
     llvm::BasicBlock *ContBlock =
@@ -4574,7 +4584,7 @@ void CGObjCMac::EmitTryOrSynchronizedStmt(CodeGen::CodeGenFunction &CGF,
     CGF.Builder.CreateStore(CGF.Builder.getFalse(), CallTryExitVar);
     CGF.EmitBranchThroughCleanup(FinallyRethrow);
 
-  // Otherwise, we have to match against the caught exceptions.
+    // Otherwise, we have to match against the caught exceptions.
   } else {
     // Retrieve the exception object.  We may emit multiple blocks but
     // nothing can cross this so the value is already in SSA form.
@@ -4760,7 +4770,7 @@ void CGObjCMac::EmitTryOrSynchronizedStmt(CodeGen::CodeGenFunction &CGF,
     if (PropagatingExnVar.isValid()) {
       PropagatingExn = CGF.Builder.CreateLoad(PropagatingExnVar);
 
-    // Otherwise, just look in the buffer for the exception to throw.
+      // Otherwise, just look in the buffer for the exception to throw.
     } else {
       llvm::CallInst *Caught = CGF.EmitNounwindRuntimeCall(
           ObjCTypes.getExceptionExtractFn(), ExceptionData.emitRawPointer(CGF));
@@ -5388,7 +5398,7 @@ IvarLayoutBuilder::buildBitmap(CGObjCCommonMac &CGObjC,
     if (beginOfScanInWords > endOfLastScanInWords) {
       skip(beginOfScanInWords - endOfLastScanInWords);
 
-    // Otherwise, start scanning where the last left off.
+      // Otherwise, start scanning where the last left off.
     } else {
       beginOfScanInWords = endOfLastScanInWords;
 
