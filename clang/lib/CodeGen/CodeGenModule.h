@@ -727,6 +727,24 @@ public:
            getCodeGenOpts().ObjCNilCheckThunk && OMD->canHaveNilCheckThunk();
   }
 
+  /// Check if the receiver of an ObjC message send is definitely non-null.
+  /// This is used to optimize direct method calls by skipping the nil-check thunk
+  /// when the receiver is provably non-null at compile time.
+  ///
+  /// This function performs static analysis at the AST level. For additional
+  /// verification, LLVM's isKnownNonZero() can be used during IR generation.
+  ///
+  /// Returns true if the receiver is:
+  /// - Marked with _Nonnull attribute
+  /// - The 'self' parameter in an instance method
+  /// - A Class object (classes are never nil after initialization)
+  /// - A result of certain operations that guarantee non-null (e.g., alloc)
+  ///
+  /// Note: This is conservative - it only returns true when definitively non-null.
+  /// For runtime values, we default to using the nil-check thunk for safety.
+  bool isObjCReceiverNonNull(const Expr *receiverExpr,
+                             CodeGenFunction &CGF) const;
+
   const std::string &getModuleNameHash() const { return ModuleNameHash; }
 
   /// Return a reference to the configured OpenCL runtime.

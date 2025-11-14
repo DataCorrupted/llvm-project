@@ -581,6 +581,44 @@ void CodeGenModule::createObjCRuntime() {
   llvm_unreachable("bad runtime kind");
 }
 
+bool CodeGenModule::isObjCReceiverNonNull(const Expr *receiverExpr,
+                                          CodeGenFunction &CGF) const {
+  if (!receiverExpr)
+    return false;
+
+  receiverExpr = receiverExpr->IgnoreParenCasts();
+  QualType type = receiverExpr->getType();
+
+  // Check for _Nonnull attribute on the receiver type
+  if (auto Nullability = type->getNullability()) {
+    if (*Nullability == NullabilityKind::NonNull)
+      return true;
+  }
+
+  // Check if receiver is 'self' in an instance method
+  // 'self' is always non-null in instance methods
+  if (auto declRef = dyn_cast<DeclRefExpr>(receiverExpr)) {
+    if (auto PD = dyn_cast<ImplicitParamDecl>(declRef->getDecl())) {
+      if (auto OMD = dyn_cast_or_null<ObjCMethodDecl>(CGF.CurCodeDecl)) {
+        if (OMD->getSelfDecl() == PD && OMD->isInstanceMethod())
+          return true;
+      }
+    }
+  }
+
+  // Check if receiver is a Class object
+  // Class objects are effectively always non-null after initialization
+  if (type->isObjCClassType() || type->isObjCQualifiedClassType())
+    return true;
+
+  // TODO: Add more cases:
+  // - Results of alloc, new, etc.
+  // - Literals (@"string", @42, etc.)
+  // - Results of certain method calls known to return non-null
+
+  return false;
+}
+
 void CodeGenModule::createOpenCLRuntime() {
   OpenCLRuntime.reset(new CGOpenCLRuntime(*this));
 }
