@@ -3889,14 +3889,13 @@ CGObjCCommonMac::GenerateDirectMethod(const ObjCMethodDecl *OMD,
   llvm::FunctionType *MethodTy =
       Types.GetFunctionType(Types.arrangeObjCMethodDeclaration(OMD));
 
-  // Determine linkage based on nil-check thunk optimization
+  // UseNilCheckThunk controls symbol naming and visibility.
+  // Linkage is always External for the true implementation.
   bool UseNilCheckThunk = CGM.shouldHaveNilCheckThunk(OMD);
-  llvm::GlobalValue::LinkageTypes Linkage =
-      UseNilCheckThunk ? llvm::GlobalValue::LinkOnceODRLinkage
-                       : llvm::GlobalValue::ExternalLinkage;
 
   if (OldFn) {
-    Fn = llvm::Function::Create(MethodTy, Linkage, "", &CGM.getModule());
+    Fn = llvm::Function::Create(MethodTy, llvm::GlobalValue::ExternalLinkage,
+                                "", &CGM.getModule());
     Fn->takeName(OldFn);
     OldFn->replaceAllUsesWith(Fn);
     OldFn->eraseFromParent();
@@ -3909,7 +3908,8 @@ CGObjCCommonMac::GenerateDirectMethod(const ObjCMethodDecl *OMD,
     auto Name = getSymbolNameForMethod(OMD, /*include category*/ false,
                                        /*includePrefixByte*/ !UseNilCheckThunk);
 
-    Fn = llvm::Function::Create(MethodTy, Linkage, Name, &CGM.getModule());
+    Fn = llvm::Function::Create(MethodTy, llvm::GlobalValue::ExternalLinkage,
+                                Name, &CGM.getModule());
     DirectMethodDefinitions.insert(std::make_pair(COMD, Fn));
   }
 
