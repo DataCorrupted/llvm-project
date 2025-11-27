@@ -117,7 +117,8 @@ public:
   virtual ~CGObjCRuntime();
 
   std::string getSymbolNameForMethod(const ObjCMethodDecl *method,
-                                     bool includeCategoryName = true);
+                                     bool includeCategoryName = true,
+                                     bool includePrefixByte = true);
 
   /// Generate the function required to register all Objective-C components in
   /// this compilation unit with the runtime library.

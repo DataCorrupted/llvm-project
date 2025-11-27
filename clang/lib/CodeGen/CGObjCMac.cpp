@@ -3889,6 +3889,8 @@ CGObjCCommonMac::GenerateDirectMethod(const ObjCMethodDecl *OMD,
   llvm::FunctionType *MethodTy =
       Types.GetFunctionType(Types.arrangeObjCMethodDeclaration(OMD));
 
+  bool ExposeSymbol = CGM.shouldExposeSymbol(OMD);
+
   if (OldFn) {
     Fn = llvm::Function::Create(MethodTy, llvm::GlobalValue::ExternalLinkage,
                                 "", &CGM.getModule());
@@ -3899,8 +3901,11 @@ CGObjCCommonMac::GenerateDirectMethod(const ObjCMethodDecl *OMD,
     // Replace the cached function in the map.
     I->second = Fn;
   } else {
-    auto Name = getSymbolNameForMethod(OMD, /*include category*/ false);
+    // Generate symbol without \01 prefix when optimization enabled
+    auto Name = getSymbolNameForMethod(OMD, /*include category*/ false,
+                                       /*includePrefixByte*/ !ExposeSymbol);
 
+    // ALWAYS use ExternalLinkage for true implementation
     Fn = llvm::Function::Create(MethodTy, llvm::GlobalValue::ExternalLinkage,
                                 Name, &CGM.getModule());
     DirectMethodDefinitions.insert(std::make_pair(COMD, Fn));
@@ -3957,7 +3962,9 @@ void CGObjCCommonMac::GenerateDirectMethodPrologue(
     ReceiverCanBeNull = isWeakLinkedClass(OID);
   }
 
-  if (ReceiverCanBeNull) {
+  // Skip nil checks when optimization enabled (applies to ALL direct methods)
+  // But KEEP class initialization for class methods (already done above)
+  if (ReceiverCanBeNull && !CGM.shouldExposeSymbol(OMD)) {
     llvm::BasicBlock *SelfIsNilBlock =
         CGF.createBasicBlock("objc_direct_method.self_is_nil");
     llvm::BasicBlock *ContBlock =
