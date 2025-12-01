@@ -373,7 +373,7 @@ To improve code organization and facilitate thunk generation in Phase 3, the pre
 void CGObjCCommonMac::GenerateDirectMethodsPreconditionCheck(
     CodeGenFunction &CGF, llvm::Function *Fn, const ObjCMethodDecl *OMD,
     const ObjCContainerDecl *CD) {
-  
+
   // For class methods: perform [self self] for class realization
   if (OMD->isClassMethod()) {
     const ObjCInterfaceDecl *OID = cast<ObjCInterfaceDecl>(CD);
@@ -393,7 +393,7 @@ void CGObjCCommonMac::GenerateDirectMethodsPreconditionCheck(
 void CGObjCCommonMac::GenerateDirectMethodPrologue(
     CodeGenFunction &CGF, llvm::Function *Fn, const ObjCMethodDecl *OMD,
     const ObjCContainerDecl *CD) {
-  
+
   bool shouldExposeSymbol = CGM.shouldExposeSymbol(OMD);
 
   // Generate precondition checks (class realization + nil check) if needed
@@ -416,7 +416,7 @@ void CGObjCCommonMac::GenerateDirectMethodPrologue(
   - True implementation calls only `GenerateDirectMethodPrologue()` (no preconditions)
   - Thunk will call `GenerateDirectMethodsPreconditionCheck()` (in Phase 3)
 - **Without flag (`shouldExposeSymbol == false`)**:
-  - `GenerateDirectMethodPrologue()` dispatches to `GenerateDirectMethodsPreconditionCheck()` 
+  - `GenerateDirectMethodPrologue()` dispatches to `GenerateDirectMethodsPreconditionCheck()`
   - Then performs its own prologue work
   - This maintains backward compatibility
 
@@ -460,102 +460,133 @@ LIT_FILTER=expose-direct-method ninja -C build-debug check-clang
 
 ---
 
-### Phase 2: Implement Call Site Nullability Analysis ⏸️ **PENDING**
+### Phase 2: Stub Dispatch Helper Functions ✅ **COMPLETED**
 
-**Objective**: Implement static analysis to determine if a receiver is provably non-null.
+**Objective**: Create stub implementations of dispatch helper functions to enable end-to-end feature completion. These will be optimized in Phase 7.
+
+**Rationale**:
+- These functions are **optimizations, not required for correctness**
+- By conservatively returning `false`, we always use thunks (safest approach)
+- This allows us to complete Phases 3-6 and get the feature working end-to-end
+- Actual optimization logic can be implemented and tested separately in Phase 7
 
 #### Files Modified:
 - `/home/peterrong/llvm-project/clang/lib/CodeGen/CodeGenModule.h`
 - `/home/peterrong/llvm-project/clang/lib/CodeGen/CodeGenModule.cpp`
+- `/home/peterrong/llvm-project/clang/test/CodeGenObjC/expose-direct-method-stub-dispatch.m`
 
 #### Changes:
 
-**Add nullability analysis function** (`CodeGenModule.h/cpp`):
+**Design Decision: Reuse Existing `canMessageReceiverBeNull` Infrastructure**
+
+Instead of creating new functions, we'll enhance the existing `canMessageReceiverBeNull` in `CGObjCRuntime`:
+- The base class already has good nullability analysis logic
+- `CGObjCCommonMac` can override to add NeXT-runtime-specific heuristics
+- This follows OOP principles and avoids code duplication
+
+**1. Make `canMessageReceiverBeNull` virtual** (`CGObjCRuntime.h`):
 
 ```cpp
-/// Check if the receiver of an ObjC message send is definitely non-null.
-/// Used to optimize direct method calls by skipping nil-check thunk.
+/// Check if the receiver of an ObjC message send can be null.
+/// Returns true if the receiver may be null, false if provably non-null.
 ///
-/// Returns true if receiver is:
-/// - Marked with _Nonnull attribute
-/// - The 'self' parameter in an instance method
-/// - A Class object (classes are never nil after initialization)
+/// This can be overridden by subclasses to add runtime-specific heuristics.
+/// Base implementation checks:
+/// - Super dispatch (always non-null)
+/// - Self in const-qualified methods (ARC)
+/// - Weak-linked classes
 ///
-/// Conservative: only returns true when definitively non-null.
-bool isObjCReceiverNonNull(const Expr *receiverExpr,
-                           CodeGenFunction &CGF) const;
+/// Future enhancements in CGObjCCommonMac override:
+/// - _Nonnull attributes
+/// - Results of alloc, new, ObjC literals
+virtual bool canMessageReceiverBeNull(CodeGenFunction &CGF,
+                              const ObjCMethodDecl *method, bool isSuper,
+                              const ObjCInterfaceDecl *classReceiver,
+                              llvm::Value *receiver);
 ```
 
-**Implementation** (`CodeGenModule.cpp`):
+**2. Add class realization check** (`CGObjCRuntime.h`):
 
 ```cpp
-bool CodeGenModule::isObjCReceiverNonNull(const Expr *receiverExpr,
-                                          CodeGenFunction &CGF) const {
-  if (!receiverExpr)
-    return false;
+/// Check if a class object can be unrealized (not yet initialized).
+/// Returns true if the class may be unrealized, false if provably realized.
+///
+/// STUB IMPLEMENTATION: Base class always returns true (conservative).
+/// Subclasses can override to add runtime-specific dominating-call analysis.
+///
+/// Future: Returns false if:
+/// - An instance method on the same class was called in a dominating path
+/// - The class was explicitly realized earlier in control flow
+/// - Note: [Parent foo] does NOT realize Child (inheritance care needed)
+virtual bool canClassObjectBeUnrealized(const ObjCInterfaceDecl *ClassDecl,
+                                        CodeGenFunction &CGF) const;
+```
 
-  receiverExpr = receiverExpr->IgnoreParenCasts();
-  QualType type = receiverExpr->getType();
+**3. Add stub implementation in base class** (`CGObjCRuntime.cpp`):
 
-  // Check 1: _Nonnull attribute
-  if (auto Nullability = type->getNullability()) {
-    if (*Nullability == NullabilityKind::NonNull)
-      return true;
-  }
-
-  // Check 2: 'self' in instance methods
-  if (auto declRef = dyn_cast<DeclRefExpr>(receiverExpr)) {
-    if (auto PD = dyn_cast<ImplicitParamDecl>(declRef->getDecl())) {
-      if (auto OMD = dyn_cast_or_null<ObjCMethodDecl>(CGF.CurCodeDecl)) {
-        if (OMD->getSelfDecl() == PD && OMD->isInstanceMethod())
-          return true;
-      }
-    }
-  }
-
-  // Check 3: 'super' in instance methods
-  // super is effectively self (cast to superclass type), so it's non-null
-  if (auto Super = dyn_cast<ObjCSuperExpr>(receiverExpr)) {
-    return true;
-  }
-
-  // Check 4: Class objects (but NOT weak-linked classes)
-  // Weakly-linked classes can be nil at runtime if their framework is unavailable
-  if (type->isObjCClassType() || type->isObjCQualifiedClassType()) {
-    // Check if this is a weakly-linked class
-    if (auto *IFace = type->getAsObjCInterfaceType()) {
-      if (auto *Decl = IFace->getDecl()) {
-        // If the class is weakly linked, it may be nil at runtime
-        if (Decl->isWeakImported())
-          return false;  // Conservative: must use thunk for nil check
-      }
-    }
-    // Non-weak-linked class objects are always non-null after initialization
-    return true;
-  }
-
-  // TODO: Future enhancements
-  // - Results of alloc, new, etc.
-  // - ObjC literals (@"string", @42, etc.)
-  // - Results of methods known to return non-null
-
-  return false;
+```cpp
+bool CGObjCRuntime::canClassObjectBeUnrealized(
+    const ObjCInterfaceDecl *ClassDecl, CodeGenFunction &CGF) const {
+  // STUB: Base implementation always returns true (conservative).
+  // Subclasses can override to add runtime-specific analysis.
+  // This means class method thunks will always perform class realization,
+  // which is safe (realizing an already-realized class is a no-op).
+  return true;
 }
 ```
 
-#### Future Enhancements:
-1. **Alloc/new detection**: Recognize `[[Class alloc] init]` patterns
-2. **Literal detection**: Recognize `@"string"`, `@[]`, `@{}`, etc.
-3. **Method return analysis**: Track methods known to return non-null
-4. **Data flow analysis**: Use LLVM's `isKnownNonZero()` at IR level
+**4. Usage in CodeGen** (`CGObjC.cpp` and other call sites):
+
+Call sites will directly use the runtime methods:
+
+```cpp
+// Check if receiver can be null (returns true if nullable)
+bool receiverCanBeNull = CGM.getObjCRuntime().canMessageReceiverBeNull(
+    CGF, Method, IsSuper, ClassReceiver, Receiver);
+
+if (!receiverCanBeNull) {
+  // Receiver is provably non-null: call implementation directly
+  // ...
+} else {
+  // Receiver may be null: use thunk
+  // ...
+}
+
+// Check if class can be unrealized (returns true if may be unrealized)
+bool classCanBeUnrealized = CGM.getObjCRuntime().canClassObjectBeUnrealized(
+    ClassDecl, CGF);
+
+if (!classCanBeUnrealized) {
+  // Class is provably realized: skip realization in thunk
+  // ...
+} else {
+  // Class may be unrealized: perform realization
+  // ...
+}
+```
+
+No wrapper functions needed in `CodeGenModule` - just directly call the runtime.
+
+#### Why This Approach Works:
+
+**For `canMessageReceiverBeNull`:**
+- Returning `true` → all instance method calls use thunks
+- Thunks perform nil check (safe, just not optimized)
+- No correctness issues, just missed optimization opportunities
+
+**For `canClassObjectBeUnrealized`:**
+- Returning `true` → all class method thunks perform `[self self]` realization
+- Safe because realizing an already-realized class is a no-op
+- No correctness issues, just potentially redundant class realization
 
 #### Test Created:
-- `clang/test/CodeGenObjC/expose-direct-method-nullability-analysis.m`
+- No new tests needed (stubs don't change behavior)
+- Tests in Phases 3-6 will work with conservative approach
 
 #### Validation:
 ```bash
-# Run all tests with expose-direct-method prefix
-LIT_FILTER=expose-direct-method ninja -C build-debug check-clang
+# Should compile successfully
+ninja -C build-debug clang
 ```
 
 ---
@@ -1231,6 +1262,326 @@ struct Point { int x, y; };
 # Run all tests with expose-direct-method prefix
 LIT_FILTER=expose-direct-method ninja -C build-debug check-clang
 ```
+
+---
+
+### Phase 7: Optimize Dispatch Helper Functions ⏸️ **PENDING**
+
+**Objective**: Implement full optimization logic for dispatch helper functions to reduce unnecessary thunk calls and class realizations.
+
+**Rationale**:
+- Phase 2 created stub implementations that always return `false` (conservative)
+- This phase adds the actual optimization logic based on static analysis
+- Performance improvement: eliminate redundant nil checks and class realizations
+- Correctness is already guaranteed by Phase 2-6; this phase only improves performance
+
+#### Files Modified:
+- `/home/peterrong/llvm-project/clang/lib/CodeGen/CodeGenModule.cpp`
+
+#### Changes:
+
+**Implement `isObjCReceiverNonNull()` with heuristics** (`CodeGenModule.cpp`):
+
+```cpp
+bool CodeGenModule::isObjCReceiverNonNull(const Expr *receiverExpr,
+                                          CodeGenFunction &CGF) const {
+  if (!receiverExpr)
+    return false;
+
+  receiverExpr = receiverExpr->IgnoreParenCasts();
+  QualType type = receiverExpr->getType();
+
+  // Heuristic 1: _Nonnull attribute
+  if (auto Nullability = type->getNullability()) {
+    if (*Nullability == NullabilityKind::NonNull)
+      return true;
+  }
+
+  // Heuristic 2: 'self' in instance methods
+  if (auto declRef = dyn_cast<DeclRefExpr>(receiverExpr)) {
+    if (auto PD = dyn_cast<ImplicitParamDecl>(declRef->getDecl())) {
+      if (auto OMD = dyn_cast_or_null<ObjCMethodDecl>(CGF.CurCodeDecl)) {
+        if (OMD->getSelfDecl() == PD && OMD->isInstanceMethod())
+          return true;
+      }
+    }
+  }
+
+  // Heuristic 3: 'super' in instance methods
+  // super is effectively self (cast to superclass type), so it's non-null
+  if (auto Super = dyn_cast<ObjCSuperExpr>(receiverExpr)) {
+    return true;
+  }
+
+  // Heuristic 4: Class objects (but NOT weak-linked classes)
+  // Weakly-linked classes can be nil at runtime if their framework is unavailable
+  if (type->isObjCClassType() || type->isObjCQualifiedClassType()) {
+    // Check if this is a weakly-linked class
+    if (auto *IFace = type->getAsObjCInterfaceType()) {
+      if (auto *Decl = IFace->getDecl()) {
+        // If the class is weakly linked, it may be nil at runtime
+        if (Decl->isWeakImported())
+          return false;  // Conservative: must use thunk for nil check
+      }
+    }
+    // Non-weak-linked class objects are always non-null after initialization
+    return true;
+  }
+
+  // Heuristic 5: Results of alloc/new (future enhancement)
+  // TODO: Recognize [[Class alloc] init] patterns
+  // Pattern: ObjCMessageExpr with selector "alloc" or "new"
+
+  // Heuristic 6: ObjC literals (future enhancement)
+  // TODO: Recognize @"string", @[], @{}, @42, etc.
+  // Check if expression is ObjCStringLiteral, ObjCArrayLiteral, etc.
+
+  // Heuristic 7: Methods known to return non-null (future enhancement)
+  // TODO: Track methods with _Nonnull return types
+  // Would require data flow analysis to track return values
+
+  return false;
+}
+```
+
+**Implement `canClassObjectBeUnrealized()` with heuristics** (`CodeGenModule.cpp`):
+
+```cpp
+bool CodeGenModule::canClassObjectBeUnrealized(const ObjCInterfaceDecl *ClassDecl,
+                                               CodeGenFunction &CGF) const {
+  if (!ClassDecl)
+    return false;
+
+  // Heuristic 1: Check if an instance method on the same class was called
+  // in a dominating path
+  //
+  // Implementation approach:
+  // - Walk backwards through the current BasicBlock
+  // - Check if any call instruction is a direct method call to an instance method
+  //   on the same class (or a superclass)
+  // - If found in a dominating block, the class must be realized
+  //
+  // IMPORTANT: Inheritance care is needed:
+  // - [Parent foo] realizes Parent, but does NOT realize Child
+  // - Only calls to instance methods on ClassDecl or its superclasses help
+  // - Calls to instance methods on subclasses do NOT help
+
+  llvm::BasicBlock *CurrentBlock = CGF.Builder.GetInsertBlock();
+  if (!CurrentBlock)
+    return false;
+
+  // Simple heuristic: Check the current basic block for dominating calls
+  // Walk backwards through instructions in the current block
+  for (auto II = CurrentBlock->rbegin(), IE = CurrentBlock->rend();
+       II != IE; ++II) {
+    llvm::Instruction *Inst = &*II;
+
+    // Check if this is a call instruction
+    if (auto *Call = dyn_cast<llvm::CallInst>(Inst)) {
+      llvm::Function *CalledFunc = Call->getCalledFunction();
+      if (!CalledFunc)
+        continue;
+
+      // Check if this is a direct method call
+      // Direct methods have names like "-[ClassName methodName]"
+      llvm::StringRef FuncName = CalledFunc->getName();
+
+      // Parse the function name to extract class information
+      // Format: "-[ClassName methodName]" for instance methods
+      if (FuncName.startswith("-[")) {
+        // Extract the class name from the symbol
+        size_t ClassStart = 2; // After "-["
+        size_t ClassEnd = FuncName.find(' ', ClassStart);
+        if (ClassEnd == llvm::StringRef::npos)
+          continue;
+
+        llvm::StringRef CalledClassName =
+            FuncName.slice(ClassStart, ClassEnd);
+
+        // Check if the called class matches or is a superclass of ClassDecl
+        // IMPORTANT: [Parent foo] does NOT realize Child
+        //            Only [Child foo] or [Parent foo] realizes Parent
+        llvm::StringRef TargetClassName = ClassDecl->getName();
+
+        if (CalledClassName == TargetClassName) {
+          // Found an instance method call on the same class
+          // The class must be realized by this point
+          return true;
+        }
+
+        // Check if CalledClassName is a superclass of ClassDecl
+        // This is conservative: if we called a superclass instance method,
+        // the superclass is realized, which means our class should be too
+        const ObjCInterfaceDecl *Super = ClassDecl->getSuperClass();
+        while (Super) {
+          if (CalledClassName == Super->getName())
+            return true;
+          Super = Super->getSuperClass();
+        }
+      }
+    }
+  }
+
+  // Heuristic 2: Check dominating blocks (advanced, future enhancement)
+  // TODO: Use LLVM's DominatorTree to check if any dominating block
+  //       contains a realizing call
+  // This would require access to CGF's function-level analysis
+
+  // Heuristic 3: Explicit class realization (future enhancement)
+  // TODO: Detect patterns like:
+  //   (void)[MyClass self];  // Explicit realization
+  //   [MyClass alloc];        // Also realizes the class
+
+  // Conservative default: assume class is not realized
+  return false;
+}
+```
+
+#### Heuristics Summary:
+
+**For `isObjCReceiverNonNull` (Instance Methods):**
+
+| Heuristic | Description | Implementation Status |
+|-----------|-------------|----------------------|
+| `_Nonnull` attribute | Receiver type has `_Nonnull` annotation | ✅ Phase 7 |
+| `self` parameter | Receiver is `self` in instance method | ✅ Phase 7 |
+| `super` keyword | Receiver is `super` (implicitly non-null) | ✅ Phase 7 |
+| Class objects | Receiver is a non-weak-linked class | ✅ Phase 7 |
+| `alloc`/`new` results | Pattern: `[[Class alloc] init]` | 🔮 Future |
+| ObjC literals | `@"string"`, `@[]`, `@{}`, `@42` | 🔮 Future |
+| Known non-null methods | Methods with `_Nonnull` return type | 🔮 Future |
+| LLVM-level analysis | Use `isKnownNonZero()` at IR level | 🔮 Future |
+
+**For `canClassObjectBeUnrealized` (Class Methods):**
+
+| Heuristic | Description | Implementation Status |
+|-----------|-------------|----------------------|
+| Instance method dominates | Instance method call on same class in dominating path | ✅ Phase 7 (basic) |
+| Dominator tree analysis | Use LLVM's DominatorTree for better precision | 🔮 Future |
+| Explicit realization | Pattern: `(void)[MyClass self]` or `[MyClass alloc]` | 🔮 Future |
+| Inheritance awareness | Careful: `[Parent foo]` does NOT realize `Child` | ✅ Phase 7 |
+
+#### Key Design Considerations:
+
+**1. Inheritance Care for Class Realization:**
+From the RFC:
+> "Extra care needs to be applied for class methods, e.g. even if [Parent foo] dominates [Child foo], the call to [Child foo] still needs to go through class realization to make sure Child is realized."
+
+This means:
+- `[Parent instanceMethod]` realizes **only** `Parent` (and its superclasses)
+- `[Child classMethod]` needs its own realization check
+- Cannot assume child classes are realized when parent is realized
+
+**2. Weak-Linked Classes:**
+- Only weak-linked classes can be `nil` at runtime
+- Check with `Decl->isWeakImported()`
+- Non-weak-linked class objects are always non-null after initialization
+
+**3. Conservative Approach:**
+- When in doubt, return `false` (use thunk)
+- False negatives (missed optimization) are acceptable
+- False positives (skipping needed nil check) are **NOT** acceptable
+
+**4. Future Optimization - Intrinsic-Based Realization:**
+From the RFC:
+> "A future optimization could replace the opaque [self self] call in CodeGen with a new LLVM intrinsic (e.g., @llvm.objc.realize.class). A backend optimizer pass (like CSE or GVN) could then safely deduplicate or remove redundant realization calls."
+
+This would allow LLVM optimization passes to:
+- Eliminate redundant `[self self]` calls across multiple direct methods
+- Common Subexpression Elimination (CSE) for class realization
+- Currently impossible due to opaque function call semantics
+
+#### Testing Strategy:
+
+**Test 1: Non-null receiver optimization**
+```objc
+// Should NOT use thunk (self is non-null)
+// CHECK-LABEL: @"-[Class caller]"
+// CHECK: call {{.*}} @"-[Class method]"
+// CHECK-NOT: _thunk
+- (int)caller {
+  return [self directMethod];  // self is non-null
+}
+```
+
+**Test 2: _Nonnull annotation**
+```objc
+// Should NOT use thunk (_Nonnull receiver)
+// CHECK: call {{.*}} @"-[Class method]"
+// CHECK-NOT: _thunk
+int caller(MyClass *_Nonnull obj) {
+  return [obj directMethod];
+}
+```
+
+**Test 3: Nullable receiver**
+```objc
+// Should use thunk (nullable receiver)
+// CHECK: call {{.*}} @"-[Class method]_thunk"
+int caller(MyClass *obj) {
+  return [obj directMethod];
+}
+```
+
+**Test 4: Class method with dominating instance call**
+```objc
+// Instance method realizes the class
+// Class method should NOT need thunk
+// CHECK-LABEL: @testClassRealized
+// CHECK: call {{.*}} @"-[Class instanceMethod]"
+// CHECK: call {{.*}} @"+[Class classMethod]"
+// CHECK-NOT: _thunk
+int testClassRealized(MyClass *obj) {
+  [obj instanceMethod];  // Realizes MyClass
+  return [MyClass classMethod];  // Class is already realized
+}
+```
+
+**Test 5: Inheritance - parent does not realize child**
+```objc
+@interface Parent : NSObject
++ (int)parentClassMethod __attribute__((objc_direct));
+@end
+
+@interface Child : Parent
++ (int)childClassMethod __attribute__((objc_direct));
+@end
+
+// Parent realization does NOT realize Child
+// CHECK-LABEL: @testInheritance
+// CHECK: call {{.*}} @"+[Parent parentClassMethod]"
+// CHECK: call {{.*}} @"+[Child childClassMethod]_thunk"
+int testInheritance(Parent *parentObj) {
+  [Parent parentClassMethod];  // Realizes Parent only
+  return [Child childClassMethod];  // Child needs realization
+}
+```
+
+#### Validation:
+```bash
+# Build with optimization enabled
+ninja -C build-debug clang
+
+# Run all tests with expose-direct-method prefix
+LIT_FILTER=expose-direct-method ninja -C build-debug check-clang
+
+# Verify optimizations are working:
+# - Non-null receivers call implementation directly (no thunk)
+# - Nullable receivers call thunk
+# - Class methods skip realization when possible
+```
+
+#### Performance Metrics:
+
+After implementing Phase 7, measure:
+1. **Binary size reduction**: Compare binary size with/without optimizations
+2. **Thunk call reduction**: Count how many calls skip thunks
+3. **Class realization reduction**: Count eliminated `[self self]` calls
+
+Expected improvements:
+- ~10-30% reduction in thunk calls (depends on code patterns)
+- Smaller binary size due to reduced thunk overhead
+- No performance regression (optimizations only)
 
 ---
 
