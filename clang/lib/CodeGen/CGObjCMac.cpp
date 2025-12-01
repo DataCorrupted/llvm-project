@@ -1056,6 +1056,10 @@ public:
   llvm::Function *GenerateDirectMethod(const ObjCMethodDecl *OMD,
                                        const ObjCContainerDecl *CD);
 
+  void GenerateDirectMethodsPreconditionCheck(
+      CodeGenFunction &CGF, llvm::Function *Fn, const ObjCMethodDecl *OMD,
+      const ObjCContainerDecl *CD) override;
+
   void GenerateDirectMethodPrologue(CodeGenFunction &CGF, llvm::Function *Fn,
                                     const ObjCMethodDecl *OMD,
                                     const ObjCContainerDecl *CD) override;
@@ -3914,7 +3918,7 @@ CGObjCCommonMac::GenerateDirectMethod(const ObjCMethodDecl *OMD,
   return Fn;
 }
 
-void CGObjCCommonMac::GenerateDirectMethodPrologue(
+void CGObjCCommonMac::GenerateDirectMethodsPreconditionCheck(
     CodeGenFunction &CGF, llvm::Function *Fn, const ObjCMethodDecl *OMD,
     const ObjCContainerDecl *CD) {
   auto &Builder = CGF.Builder;
@@ -3931,9 +3935,6 @@ void CGObjCCommonMac::GenerateDirectMethodPrologue(
   // if (self == nil) {
   //     return (ReturnType){ };
   // }
-  //
-  // _cmd = @selector(...)
-  // ...
 
   if (OMD->isClassMethod()) {
     const ObjCInterfaceDecl *OID = cast<ObjCInterfaceDecl>(CD);
@@ -3962,9 +3963,8 @@ void CGObjCCommonMac::GenerateDirectMethodPrologue(
     ReceiverCanBeNull = isWeakLinkedClass(OID);
   }
 
-  // Skip nil checks when optimization enabled (applies to ALL direct methods)
-  // But KEEP class initialization for class methods (already done above)
-  if (ReceiverCanBeNull && !CGM.shouldExposeSymbol(OMD)) {
+  // Generate nil check
+  if (ReceiverCanBeNull) {
     llvm::BasicBlock *SelfIsNilBlock =
         CGF.createBasicBlock("objc_direct_method.self_is_nil");
     llvm::BasicBlock *ContBlock =
@@ -3993,8 +3993,21 @@ void CGObjCCommonMac::GenerateDirectMethodPrologue(
     CGF.EmitBlock(ContBlock);
     Builder.SetInsertPoint(ContBlock);
   }
+}
 
-  // only synthesize _cmd if it's referenced
+void CGObjCCommonMac::GenerateDirectMethodPrologue(
+    CodeGenFunction &CGF, llvm::Function *Fn, const ObjCMethodDecl *OMD,
+    const ObjCContainerDecl *CD) {
+  // Generate precondition checks (class realization + nil check) if needed
+  // Without flag: precondition checks are in the implementation
+  // With flag: precondition checks will be in the thunk (not here)
+  if (!CGM.shouldExposeSymbol(OMD)) {
+    GenerateDirectMethodsPreconditionCheck(CGF, Fn, OMD, CD);
+  }
+
+  auto &Builder = CGF.Builder;
+  // Only synthesize _cmd if it's referenced
+  // This is the actual "prologue" work that always happens
   if (OMD->getCmdDecl()->isUsed()) {
     // `_cmd` is not a parameter to direct methods, so storage must be
     // explicitly declared for it.
@@ -4581,7 +4594,7 @@ void CGObjCMac::EmitTryOrSynchronizedStmt(CodeGen::CodeGenFunction &CGF,
     CGF.Builder.CreateStore(CGF.Builder.getFalse(), CallTryExitVar);
     CGF.EmitBranchThroughCleanup(FinallyRethrow);
 
-  // Otherwise, we have to match against the caught exceptions.
+    // Otherwise, we have to match against the caught exceptions.
   } else {
     // Retrieve the exception object.  We may emit multiple blocks but
     // nothing can cross this so the value is already in SSA form.
@@ -4767,7 +4780,7 @@ void CGObjCMac::EmitTryOrSynchronizedStmt(CodeGen::CodeGenFunction &CGF,
     if (PropagatingExnVar.isValid()) {
       PropagatingExn = CGF.Builder.CreateLoad(PropagatingExnVar);
 
-    // Otherwise, just look in the buffer for the exception to throw.
+      // Otherwise, just look in the buffer for the exception to throw.
     } else {
       llvm::CallInst *Caught = CGF.EmitNounwindRuntimeCall(
           ObjCTypes.getExceptionExtractFn(), ExceptionData.emitRawPointer(CGF));
@@ -5395,7 +5408,7 @@ IvarLayoutBuilder::buildBitmap(CGObjCCommonMac &CGObjC,
     if (beginOfScanInWords > endOfLastScanInWords) {
       skip(beginOfScanInWords - endOfLastScanInWords);
 
-    // Otherwise, start scanning where the last left off.
+      // Otherwise, start scanning where the last left off.
     } else {
       beginOfScanInWords = endOfLastScanInWords;
 

@@ -22,7 +22,9 @@
 // CHECK-LABEL: define {{.*}} @"+[MyClass classDirectMethod]"(
 // CHECK-NOT: @"\01+[MyClass classDirectMethod]"
 + (int)classDirectMethod {
-  // Class methods keep [self self] initialization
+  // With optimization enabled, class methods should NOT have [self self] initialization
+  // The class realization will be done in the thunk instead
+  // CHECK-NOT: call {{.*}} @objc_msgSend
   // CHECK-NOT: icmp eq ptr {{.*}}, null
   // CHECK-NOT: objc_direct_method.self_is_nil
   return 24;
