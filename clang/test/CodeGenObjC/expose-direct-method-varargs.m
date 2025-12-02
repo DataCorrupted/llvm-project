@@ -8,6 +8,13 @@ __attribute__((objc_root_class))
 + (void)printf:(Root *)format, ... __attribute__((objc_direct));
 @end
 
+// Add a weakly linked class and a weakly linked class method
+__attribute__((objc_root_class, weak_import))
+@interface WeakRoot
++ (int)weakPrintf:(int)first, ... __attribute__((objc_direct, weak_import));
+@end
+
+
 @implementation Root
 
 // Variadic methods get exposed symbols WITHOUT nil checks in implementation
@@ -29,20 +36,68 @@ __attribute__((objc_root_class))
 
 @end
 
-// Regardless root's nullable state, the caller will emit inline nil checks
-// Check that the nil checks are inlined correctly in phase 4 and 5.
+// Test: Nullable receiver should have inline nil check
+// CHECK-LABEL: define{{.*}} void @useRoot(
 void useRoot(Root *_Nullable root) {
-  // CHECK: %call = call i32 (ptr, i32, ...) @"-[Root varMethod:]"
+  // For nullable receivers, we should emit nil check inline
+  // CHECK: icmp eq ptr %{{[0-9]+}}, null
+  // CHECK: br i1 %{{[0-9]+}}, label %msgSend.null-receiver, label %msgSend.call
+
+  // CHECK: msgSend.call:
+  // CHECK: call i32 (ptr, i32, ...) @"-[Root varMethod:]"(ptr noundef %{{[0-9]+}}, i32 noundef 1, i32 noundef 2, double noundef 3.0{{.*}})
+  // CHECK: br label %msgSend.cont
+
+  // CHECK: msgSend.null-receiver:
+  // CHECK: br label %msgSend.cont
+
+  // CHECK: msgSend.cont:
   [root varMethod:1, 2, 3.0];
-  // CHECK: call void (ptr, ptr, ...) @"+[Root printf:]"
+
+  // Class realization before call
+  // CHECK: %{{.*}} = load ptr, ptr @"OBJC_CLASSLIST_REFERENCES_$
+  // CHECK: %{{.*}} = load ptr, ptr @OBJC_SELECTOR_REFERENCES_,
+  // CHECK: %{{.*}} = call ptr @objc_msgSend
+  // CHECK: call void (ptr, ptr, ...) @"+[Root printf:]"(
   [Root printf:root, "hello", root];
+
+  // For weakly linked class, inline realization first
+  // CHECK: %{{.*}} = load ptr, ptr @"OBJC_CLASSLIST_REFERENCES_$
+  // CHECK: %{{.*}} = load ptr, ptr @OBJC_SELECTOR_REFERENCES_,
+  // CHECK: %{{.*}} = call ptr @objc_msgSend
+
+  // Then perform nil check
+  // CHECK: %{{.*}} = icmp eq ptr %{{.*}}, null
+  // CHECK: br i1 %{{.*}}, label %msgSend.null-receiver{{.*}}, label %msgSend.call{{.*}}
+
+  // Finally call the class method
+  // CHECK: %{{.*}} = call i32 (ptr, i32, ...) @"+[WeakRoot weakPrintf:]"
+  [WeakRoot weakPrintf: 1, 2, 3.0];
 }
 
+// Test: Non-null receiver
+// NOTE: Phase 7 will optimize this to skip nil checks when _Nonnull is detected
+// For now (Phase 4), it should look the same as the nullable receiver case above
 
+// CHECK-LABEL: define{{.*}} void @useRootNonNull(
 void useRootNonNull(Root *_Nonnull root) {
+  // For nullable receivers, we should emit nil check inline
+  // CHECK: icmp eq ptr %{{[0-9]+}}, null
+  // CHECK: br i1 %{{[0-9]+}}, label %msgSend.null-receiver, label %msgSend.call
 
-  // CHECK: %call = call i32 (ptr, i32, ...) @"-[Root varMethod:]"
+  // CHECK: msgSend.call:
+  // CHECK: call i32 (ptr, i32, ...) @"-[Root varMethod:]"(ptr noundef %{{[0-9]+}}, i32 noundef 1, i32 noundef 2, double noundef 3.0{{.*}})
+  // CHECK: br label %msgSend.cont
+
+  // CHECK: msgSend.null-receiver:
+  // CHECK: br label %msgSend.cont
+
+  // CHECK: msgSend.cont:
   [root varMethod:1, 2, 3.0];
-  // CHECK: call void (ptr, ptr, ...) @"+[Root printf:]"
+
+  // Class realization before call
+  // CHECK: %{{.*}} = load ptr, ptr @"OBJC_CLASSLIST_REFERENCES_$
+  // CHECK: %{{.*}} = load ptr, ptr @OBJC_SELECTOR_REFERENCES_,
+  // CHECK: %{{.*}} = call ptr @objc_msgSend
+  // CHECK: call void (ptr, ptr, ...) @"+[Root printf:]"(
   [Root printf:root, "hello", root];
 }

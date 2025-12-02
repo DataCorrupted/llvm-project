@@ -1075,6 +1075,13 @@ public:
                                         bool ReceiverCanBeNull,
                                         bool ClassObjectCanBeUnrealized);
 
+  /// Generate class realization code: [self self]
+  /// This is used for class methods to ensure the class is initialized.
+  /// Returns the realized class object.
+  llvm::Value *GenerateClassRealization(CodeGenFunction &CGF,
+                                        llvm::Value *classObject,
+                                        const ObjCInterfaceDecl *OID);
+
   void GenerateDirectMethodsPreconditionCheck(
       CodeGenFunction &CGF, llvm::Function *Fn, const ObjCMethodDecl *OMD,
       const ObjCContainerDecl *CD) override;
@@ -2096,6 +2103,9 @@ CodeGen::RValue CGObjCCommonMac::EmitMessageSend(
 
   bool ReceiverCanBeNull =
       canMessageReceiverBeNull(CGF, Method, IsSuper, ClassReceiver, Arg0);
+  bool ClassObjectCanBeUnrealized =
+      Method && Method->isClassMethod() &&
+      canClassObjectBeUnrealized(ClassReceiver, CGF);
 
   bool RequiresNullCheck = false;
   bool RequiresSelValue = true;
@@ -2103,13 +2113,11 @@ CodeGen::RValue CGObjCCommonMac::EmitMessageSend(
   llvm::FunctionCallee Fn = nullptr;
   if (Method && Method->isDirectMethod()) {
     assert(!IsSuper);
-    bool ClassObjectCanBeUnrealized =
-        Method->isClassMethod() &&
-        canClassObjectBeUnrealized(ClassReceiver, CGF);
     // Use GetDirectMethodCallee to decide whether to use implementation or
     // thunk.
     Fn = GetDirectMethodCallee(Method, Method->getClassInterface(),
                                ReceiverCanBeNull, ClassObjectCanBeUnrealized);
+
     // Direct methods will synthesize the proper `_cmd` internally,
     // so just don't bother with setting the `_cmd` argument.
     RequiresSelValue = false;
@@ -2145,6 +2153,23 @@ CodeGen::RValue CGObjCCommonMac::EmitMessageSend(
   // Emit a null-check if there's a consumed argument other than the receiver.
   if (!RequiresNullCheck && Method && Method->hasParamDestroyedInCallee())
     RequiresNullCheck = true;
+
+  if (CGM.shouldHaveNilCheckInline(Method)) {
+    // For variadic class methods, we need to inline pre condition checks. That
+    // include two things:
+    // 1. if this is a class method, we have to realize the class if we are not
+    // sure.
+    if (ClassReceiver && ClassObjectCanBeUnrealized) {
+      // Perform class realization using the helper function
+      Arg0 = GenerateClassRealization(CGF, Arg0, ClassReceiver);
+      ActualArgs[0] = CallArg(RValue::get(Arg0), ActualArgs[0].Ty);
+    }
+    // 2. inline the nil check if we are not sure if the receiver can be null.
+    // Luckly, `NullReturnState` already does that for corner cases like
+    // ns_consume, we only need to override the flag, even if return value is
+    // unused.
+    RequiresNullCheck |= ReceiverCanBeNull;
+  }
 
   NullReturnState nullReturn;
   if (RequiresNullCheck) {
@@ -4147,6 +4172,23 @@ llvm::Function *CGObjCCommonMac::GetDirectMethodCallee(
   }
 }
 
+llvm::Value *
+CGObjCCommonMac::GenerateClassRealization(CodeGenFunction &CGF,
+                                          llvm::Value *classObject,
+                                          const ObjCInterfaceDecl *OID) {
+  // Generate: self = [self self]
+  // This forces class lazy initialization
+  Selector SelfSel = GetNullarySelector("self", CGM.getContext());
+  auto ResultType = CGF.getContext().getObjCIdType();
+  CallArgList Args;
+
+  RValue result = GeneratePossiblySpecializedMessageSend(
+      CGF, ReturnValueSlot(), ResultType, SelfSel, classObject, Args, OID,
+      nullptr, true);
+
+  return result.getScalarVal();
+}
+
 void CGObjCCommonMac::GenerateDirectMethodsPreconditionCheck(
     CodeGenFunction &CGF, llvm::Function *Fn, const ObjCMethodDecl *OMD,
     const ObjCContainerDecl *CD) {
@@ -4169,10 +4211,6 @@ void CGObjCCommonMac::GenerateDirectMethodsPreconditionCheck(
     const ObjCInterfaceDecl *OID = cast<ObjCInterfaceDecl>(CD);
     assert(OID &&
            "GenerateDirectMethod() should be called with the Class Interface");
-    Selector SelfSel = GetNullarySelector("self", CGM.getContext());
-    auto ResultType = CGF.getContext().getObjCIdType();
-    RValue result;
-    CallArgList Args;
 
     // TODO: If this method is inlined, the caller might know that `self` is
     // already initialized; for example, it might be an ordinary Objective-C
@@ -4181,10 +4219,10 @@ void CGObjCCommonMac::GenerateDirectMethodsPreconditionCheck(
     //
     // We should find a way to eliminate this unnecessary initialization in such
     // cases in LLVM.
-    result = GeneratePossiblySpecializedMessageSend(
-        CGF, ReturnValueSlot(), ResultType, SelfSel, selfValue, Args, OID,
-        nullptr, true);
-    Builder.CreateStore(result.getScalarVal(), selfAddr);
+
+    // Perform class realization using the helper function
+    llvm::Value *realizedClass = GenerateClassRealization(CGF, selfValue, OID);
+    Builder.CreateStore(realizedClass, selfAddr);
 
     // Nullable `Class` expressions cannot be messaged with a direct method
     // so the only reason why the receive can be null would be because
