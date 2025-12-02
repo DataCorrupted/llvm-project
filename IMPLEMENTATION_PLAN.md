@@ -252,7 +252,12 @@ defm objc_expose_direct_methods : BoolFOption<"objc-expose-direct-methods",
 **Note**: Using the flag name `-fobjc-expose-direct-methods` with internal CodeGenOption `ObjCExposeDirectMethods`.
 
 #### Tests Created:
-- `clang/test/CodeGenObjC/expose-direct-method-flag.m` (flag recognition test)
+- `clang/test/CodeGenObjC/expose-direct-method-flag.m` (flag recognition test - verifies flag is recognized by compiler)
+
+**Note**: Multiple redundant test files were consolidated in Phase 1 to reduce duplication:
+- ~~`expose-direct-method-stub-dispatch.m`~~ (deleted - functionality merged into main test)
+- ~~`expose-direct-method-thunks.m`~~ (deleted - functionality merged into main test)
+- `expose-direct-method.m` (consolidated test covering all basic functionality, stub dispatch, and thunk generation)
 
 #### Validation:
 ```bash
@@ -591,149 +596,313 @@ ninja -C build-debug clang
 
 ---
 
-### Phase 3: Implement Thunk Generation ⏸️ **PENDING**
+### Phase 3: Implement Thunk Generation ✅ **COMPLETED**
 
-**Objective**: Generate nil-check thunks at call sites for nullable receivers.
+**Objective**: Generate nil-check thunks for nullable receivers, both for methods defined in the current TU and for cross-TU calls.
 
-#### Files to Modify:
+#### Files Modified:
 - `/home/peterrong/llvm-project/clang/lib/CodeGen/CGObjCMac.cpp`
-- `/home/peterrong/llvm-project/clang/lib/CodeGen/CodeGenModule.h`
-- `/home/peterrong/llvm-project/clang/lib/CodeGen/CodeGenModule.cpp`
+- `/home/peterrong/llvm-project/clang/lib/CodeGen/CodeGenFunction.h`
+- `/home/peterrong/llvm-project/clang/test/CodeGenObjC/direct-method-ret-mismatch.m`
+- `/home/peterrong/llvm-project/clang/test/CodeGenObjC/expose-direct-method-stub-dispatch.m`
+- `/home/peterrong/llvm-project/clang/test/CodeGenObjC/expose-direct-method-varargs.m`
+- `/home/peterrong/llvm-project/clang/test/CodeGenObjC/expose-direct-method.m`
+
+#### Design Overview:
+
+**Key Insight**: `GenerateDirectMethod()` has two different usage patterns that need different return values:
+1. **Body Generation** (`GenerateMethod`): Needs TRUE IMPLEMENTATION (where method body is emitted)
+2. **Call Sites** (`EmitMessageSend`): Needs IMPLEMENTATION or THUNK (based on nullability)
+
+**Solution**: Change `GenerateDirectMethod()` to return `DirectMethodInfo&` (containing both), add new `GetDirectMethodCallee()` for call sites.
 
 #### Changes:
 
-**1. Add thunk cache** (`CodeGenModule.h`):
-```cpp
-private:
-  /// Cache of generated nil-check thunks to avoid duplicates within a module
-  llvm::DenseMap<const ObjCMethodDecl*, llvm::Function*> ObjCDirectThunks;
+**1. Update DirectMethodDefinitions cache structure** (`CGObjCMac.cpp`):
 
-public:
-  /// Get or create a nil-check thunk for a direct method
-  llvm::Function* getOrCreateObjCDirectThunk(const ObjCMethodDecl *OMD);
+```cpp
+// BEFORE (old structure):
+llvm::DenseMap<const ObjCMethodDecl *, llvm::Function *> DirectMethodDefinitions;
+
+// AFTER (new structure):
+/// Information about a direct method definition
+struct DirectMethodInfo {
+  llvm::Function *Implementation;  // The true implementation (where body is emitted)
+  llvm::Function *Thunk;            // The nil-check thunk (nullptr if not generated)
+
+  DirectMethodInfo(llvm::Function *Impl)
+    : Implementation(Impl), Thunk(nullptr) {}
+};
+
+llvm::DenseMap<const ObjCMethodDecl *, DirectMethodInfo> DirectMethodDefinitions;
 ```
 
-**2. Implement thunk generation** (`CodeGenModule.cpp`):
+**Rationale**: When Objective-C type covariance causes implementation replacement, we must also replace the thunk to maintain musttail compatibility. Storing both together enables atomic updates.
+
+**2. Update GenerateMethod() to extract Implementation** (`CGObjCMac.cpp`):
 
 ```cpp
-llvm::Function* CodeGenModule::getOrCreateObjCDirectThunk(
-    const ObjCMethodDecl *OMD) {
+llvm::Function *CGObjCCommonMac::GenerateMethod(const ObjCMethodDecl *OMD,
+                                                const ObjCContainerDecl *CD) {
+  llvm::Function *Method;
 
-  // Check cache first
-  auto it = ObjCDirectThunks.find(OMD);
-  if (it != ObjCDirectThunks.end())
-    return it->second;
+  if (OMD->isDirectMethod()) {
+    // Returns DirectMethodInfo& containing both Implementation and Thunk
+    DirectMethodInfo& Info = GenerateDirectMethod(OMD, CD);
+    Method = Info.Implementation;  // Extract implementation for body generation
+  } else {
+    auto Name = getSymbolNameForMethod(OMD);
 
-  // Get the true implementation function
-  llvm::Function *TrueImpl = /* ... get from runtime ... */;
+    CodeGenTypes &Types = CGM.getTypes();
+    llvm::FunctionType *MethodTy =
+        Types.GetFunctionType(Types.arrangeObjCMethodDeclaration(OMD));
+    Method = llvm::Function::Create(
+        MethodTy, llvm::GlobalValue::InternalLinkage, Name, &CGM.getModule());
+  }
 
-  // Create thunk function type (same as implementation)
-  llvm::FunctionType *ThunkTy = TrueImpl->getFunctionType();
+  MethodDefinitions.insert(std::make_pair(OMD, Method));
 
-  // Generate thunk name: symbol + "_thunk"
-  std::string ThunkName = TrueImpl->getName().str() + "_thunk";
+  return Method;
+}
+```
 
-  // Create thunk with linkonce_odr linkage
+**3. Modify GenerateDirectMethod() to return DirectMethodInfo&** (`CGObjCMac.cpp`):
+
+**Key Change**: Returns reference to `DirectMethodInfo` (both Implementation and Thunk), not just the implementation function.
+
+```cpp
+DirectMethodInfo&
+CGObjCCommonMac::GenerateDirectMethod(const ObjCMethodDecl *OMD,
+                                      const ObjCContainerDecl *CD) {
+  auto *COMD = OMD->getCanonicalDecl();
+  auto I = DirectMethodDefinitions.find(COMD);
+  llvm::Function *OldFn = nullptr, *Fn = nullptr;
+
+  // ... existing code to check cache and create implementation function ...
+
+  if (I != DirectMethodDefinitions.end()) {
+    // Method already defined, get existing implementation
+    OldFn = I->second.Implementation;
+    // ... handle type mismatch if needed ...
+  }
+
+  // Create the implementation function
+  // ... existing code to create Fn ...
+
+  // Store in cache
+  if (I == DirectMethodDefinitions.end()) {
+    // First time seeing this method
+    DirectMethodInfo Info(Fn);
+    DirectMethodDefinitions.insert(std::make_pair(COMD, Info));
+    I = DirectMethodDefinitions.find(COMD);
+  } else {
+    // Update existing entry
+    I->second.Implementation = Fn;
+    llvm::Function *OldThunk = I->second.Thunk;
+
+    // CRITICAL: If implementation was replaced, and old thunk exists, invalidate the old thunk
+    if (OldFn && OldThunk) {
+
+      // Type mismatch occurred - regenerate thunk with correct type
+      llvm::Function *NewThunk = GenerateThunkForDirectMethod(OMD, CD, Fn);
+
+      // Replace all uses before erasing
+      NewThunk->takeName(OldThunk);
+      OldThunk->replaceAllUsesWith(NewThunk);
+      OldThunk->eraseFromParent();
+
+      I->second.Thunk = NewThunk;
+    }
+  }
+
+  // Generate thunk if optimization is enabled (only if not already created above)
+  if (CGM.shouldHaveNilCheckThunk(OMD) && !I->second.Thunk) {
+    llvm::Function *Thunk = GenerateThunkForDirectMethod(OMD, CD, Fn);
+    I->second.Thunk = Thunk;
+  }
+
+  // Return reference to DirectMethodInfo (contains both Implementation and Thunk)
+  return I->second;
+}
+```
+
+**4. Add new helper: GenerateObjCDirectThunk()** (`CGObjCMac.cpp`):
+
+```cpp
+llvm::Function *
+CGObjCCommonMac::GenerateThunkForDirectMethod(
+    const ObjCMethodDecl *OMD,
+    const ObjCContainerDecl *CD,
+    llvm::Function *Implementation) {
+
+  assert(CGM.shouldHaveNilCheckThunk(OMD) && "Should only generate thunk when optimization enabled");
+  assert(Implementation && "Implementation must exist");
+
+  // Get function type (same as implementation)
+  llvm::FunctionType *ThunkTy = Implementation->getFunctionType();
+
+  // Generate thunk name: implementation symbol + "_thunk"
+  std::string ThunkName = Implementation->getName().str() + "_thunk";
+
+  // Create thunk with linkonce_odr linkage (allows deduplication)
   llvm::Function *Thunk = llvm::Function::Create(
       ThunkTy,
       llvm::GlobalValue::LinkOnceODRLinkage,
       ThunkName,
-      &getModule());
+      &CGM.getModule());
 
   // Set attributes
   Thunk->setVisibility(llvm::GlobalValue::HiddenVisibility);
   Thunk->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
 
-  // CRITICAL: Copy function-level attributes from TrueImpl to Thunk
-  // These attributes affect code generation and optimization
-  llvm::AttributeList ImplAttrs = TrueImpl->getAttributes();
+  // CRITICAL: Copy function-level attributes from implementation
+  llvm::AttributeList ImplAttrs = Implementation->getAttributes();
   Thunk->setAttributes(ImplAttrs);
 
-  // CRITICAL: Copy parameter attributes for musttail compatibility
-  // Parameter attributes like ns_consumed, sext, zext, inreg, byval must match exactly
-  // The AttributeList already contains param attributes, so they're copied above
+  // Build argument list for StartFunction
+  // (We need actual VarDecl parameters, not just LLVM args)
+  FunctionArgList FunctionArgs;
+  FunctionArgs.push_back(OMD->getSelfDecl());
+  if (!OMD->isDirectMethod())
+    FunctionArgs.push_back(OMD->getCmdDecl());
+  FunctionArgs.append(OMD->param_begin(), OMD->param_end());
 
-  // Generate thunk body
-  llvm::BasicBlock *Entry = llvm::BasicBlock::Create(getLLVMContext(),
-                                                     "entry", Thunk);
-  llvm::BasicBlock *NilCase = llvm::BasicBlock::Create(getLLVMContext(),
-                                                       "nil_case", Thunk);
-  llvm::BasicBlock *NonNilCase = llvm::BasicBlock::Create(getLLVMContext(),
-                                                          "non_nil_case", Thunk);
+  // Get CGFunctionInfo for this method
+  const CGFunctionInfo &FI = CGM.getTypes().arrangeObjCMethodDeclaration(OMD);
 
-  llvm::IRBuilder<> Builder(Entry);
+  // Create a CodeGenFunction to generate the thunk body
+  // This gives us access to helper functions like GenerateDirectMethodsPreconditionCheck
+  CodeGenFunction CGF(CGM);
+  CGF.CurFuncDecl = OMD;
+  CGF.CurCodeDecl = OMD;
 
-  // Determine the 'self' parameter index correctly
-  // IMPORTANT: With sret, self is argument 1, not 0
-  // Use CGFunctionInfo to determine correct parameter layout
-  const CGFunctionInfo &FI = getTypes().arrangeObjCMethodDeclaration(OMD);
-  bool UsesSRet = FI.getReturnInfo().isIndirect();
+  // Start the function with CORRECT return type (not VoidTy!)
+  // This sets up the function prologue, entry block, allocas, etc.
+  CGF.StartFunction(GlobalDecl(OMD), OMD->getReturnType(), Thunk, FI, FunctionArgs,
+                    OMD->getLocation(), OMD->getLocation());
 
-  // Get self parameter: index 0 normally, index 1 if using sret
-  unsigned SelfIndex = UsesSRet ? 1 : 0;
-  llvm::Value *Self = Thunk->getArg(SelfIndex);
+  // REUSE Phase 1's precondition check logic!
+  // This generates: [self self] for class methods + nil check
+  GenerateDirectMethodsPreconditionCheck(CGF, Thunk, OMD, CD);
 
-  // For class methods: perform class realization first
-  if (OMD->isClassMethod()) {
-    // Call [self self] to realize the class
-    // This ensures the class is initialized before proceeding
-    // ... implementation details ...
-  }
-
-  // Check if self == null
-  llvm::Value *IsNil = Builder.CreateIsNull(Self, "is_nil");
-  Builder.CreateCondBr(IsNil, NilCase, NonNilCase);
-
-  // Nil case: return zero-initialized value
-  Builder.SetInsertPoint(NilCase);
-  if (UsesSRet) {
-    // With sret, write zero to the return buffer and return void
-    llvm::Value *SRetPtr = Thunk->getArg(0);
-    llvm::Type *RetTy = SRetPtr->getType()->getPointerElementType();
-    llvm::Value *ZeroVal = llvm::Constant::getNullValue(RetTy);
-    Builder.CreateStore(ZeroVal, SRetPtr);
-    Builder.CreateRetVoid();
-  } else {
-    llvm::Type *RetTy = ThunkTy->getReturnType();
-    if (RetTy->isVoidTy()) {
-      Builder.CreateRetVoid();
-    } else {
-      llvm::Value *ZeroVal = llvm::Constant::getNullValue(RetTy);
-      Builder.CreateRet(ZeroVal);
-    }
-  }
-
-  // Non-nil case: musttail call to true implementation
-  Builder.SetInsertPoint(NonNilCase);
-
-  // Collect all arguments
+  // After precondition check, make musttail call to implementation
+  // Get all arguments
   SmallVector<llvm::Value*, 8> Args;
   for (auto &Arg : Thunk->args())
     Args.push_back(&Arg);
 
   // Create musttail call
-  // CRITICAL: All attributes were already copied, so this should verify correctly
-  llvm::CallInst *Call = Builder.CreateCall(TrueImpl, Args);
+  llvm::CallInst *Call = CGF.Builder.CreateCall(Implementation, Args);
   Call->setTailCallKind(llvm::CallInst::TCK_MustTail);
-  Call->setCallingConv(TrueImpl->getCallingConv());
+  Call->setCallingConv(Implementation->getCallingConv());
 
-  // Return the result
-  if (UsesSRet) {
-    Builder.CreateRetVoid();
+  // Return the result (or void)
+  if (FI.getReturnInfo().isIndirect()) {
+    // SRet case: return void
+    CGF.Builder.CreateRetVoid();
   } else {
     llvm::Type *RetTy = ThunkTy->getReturnType();
     if (RetTy->isVoidTy())
-      Builder.CreateRetVoid();
+      CGF.Builder.CreateRetVoid();
     else
-      Builder.CreateRet(Call);
+      CGF.Builder.CreateRet(Call);
   }
 
-  // Cache the thunk
-  ObjCDirectThunks[OMD] = Thunk;
+  // Finish the function - emits epilogue, cleanup, etc.
+  // This is REQUIRED to properly finalize the function
+  CGF.FinishFunction();
 
+  // Return the thunk (caller will cache it)
   return Thunk;
 }
 ```
+
+**5. Add new dispatch function: GetDirectMethodCallee()** (`CGObjCMac.cpp`):
+
+This function centralizes the decision logic for choosing between implementation and thunk at call sites.
+
+```cpp
+llvm::Function *
+CGObjCCommonMac::GetDirectMethodCallee(const ObjCMethodDecl *OMD,
+                                       const ObjCContainerDecl *CD,
+                                       bool ReceiverCanBeNull,
+                                       bool ClassObjectCanBeUnrealized) {
+  DirectMethodInfo& Info = GenerateDirectMethod(OMD, CD);
+
+  // If optimization not enabled, always use implementation (which includes the nil check)
+  if (!CGM.shouldExposeSymbol(OMD)) {
+    return Info.Implementation;
+  }
+
+  // Variadic methods don't have thunk, the caller needs to inline the nil check
+  if (CGM.shouldHaveNilCheckInline(OMD)) {
+    return Info.Implementation;
+  }
+
+  assert(CGM.shouldHaveNilCheckThunk(OMD));
+
+  if (OMD->isInstanceMethod()) {
+    // If we can prove instance method's receiver is not null, return the true implementation
+    return ReceiverCanBeNull ? Info.Thunk : Info.Implementation;
+  } else if (OMD->isClassMethod()) {
+    // For class methods, it needs to be non-null and realized before we dispatch to true implementation
+    return (ReceiverCanBeNull || ClassObjectCanBeUnrealized)
+               ? Info.Thunk
+               : Info.Implementation;
+  } else {
+    assert(false && "OMD should either be a class method or instance method");
+  }
+}
+```
+
+**Key Simplifications from Original Plan:**
+- ✅ **Single source of truth**: All dispatch logic in one place
+- ✅ **Simpler interface**: Callers just pass nullability flags, not complex expressions
+- ✅ **Clearer logic**: Easy to understand the decision tree
+- ✅ **Better separation**: Nullability analysis is done by the caller, dispatch is done here
+
+**6. Add thunk lifecycle helpers** (`CodeGenFunction.h` and `CGObjCMac.cpp`):
+
+Borrowed from C++ vtable thunks in `CGVTables.cpp`, these helpers properly manage thunk function generation:
+
+```cpp
+/// Start an Objective-C direct method thunk.
+void CodeGenFunction::StartObjCDirectThunk(const ObjCMethodDecl *OMD,
+                                           llvm::Function *Fn,
+                                           const CGFunctionInfo &FnInfo,
+                                           const FunctionArgList &Args) {
+  // Similar to StartThunk() for C++ virtual methods
+  // Sets up function state without requiring an AST body
+  StartFunction(GlobalDecl(), OMD->getReturnType(), Fn, FnInfo, Args,
+                OMD->getLocation(), OMD->getLocation());
+
+  // Manually set the decl so other utilities can access the AST
+  CurCodeDecl = OMD;
+  CurFuncDecl = OMD;
+}
+
+/// Finish an Objective-C direct method thunk.
+void CodeGenFunction::FinishObjCDirectThunk() {
+  // Create dummy unreachable block (removed by optimizer)
+  EmitBlock(createBasicBlock());
+
+  // Disable final ARC autorelease (thunk uses musttail)
+  AutoreleaseResult = false;
+
+  // Restore invariants
+  CurCodeDecl = nullptr;
+  CurFuncDecl = nullptr;
+
+  FinishFunction();
+}
+```
+
+**Architectural Improvements over Original Plan:**
+- ✅ **`DirectMethodInfo` struct**: Stores Implementation + Thunk together for atomic updates
+- ✅ **Better type covariance handling**: When implementation is replaced, thunk is also regenerated
+- ✅ **Cleaner separation**: `GenerateDirectMethod()` for generation, `GetDirectMethodCallee()` for dispatch
+- ✅ **Reuses Phase 1 code**: Thunks call `GenerateDirectMethodsPreconditionCheck()`
+- ✅ **Proper lifecycle management**: `StartObjCDirectThunk()` / `FinishObjCDirectThunk()` borrowed from C++ thunks
 
 #### Critical Implementation Details:
 
@@ -813,68 +982,73 @@ struct Point { int x, y; };
 
 ---
 
-### Phase 4: Integrate Call Site Logic ⏸️ **PENDING**
+### Phase 4: Integrate Call Site Logic 🚧 **IN PROGRESS**
 
-**Objective**: Use nullability analysis to decide whether to call implementation directly or via thunk.
+**Objective**: Update call sites to use `GetDirectMethodCallee()` which decides whether to call implementation or thunk based on nullability.
 
-#### Files to Modify:
-- `/home/peterrong/llvm-project/clang/lib/CodeGen/CGObjC.cpp`
+#### Files Modified/To Modify:
+- ✅ `/home/peterrong/llvm-project/clang/lib/CodeGen/CGObjCMac.cpp` (GetDirectMethodCallee implemented, EmitMessageSend partially updated)
+- ⏸️ `/home/peterrong/llvm-project/clang/lib/CodeGen/CGObjC.cpp` (still needs updates for call site emission)
 
 #### Changes:
 
-**Modify direct method call emission** (`CGObjC.cpp`):
-
-Current location: Search for `EmitObjCMessageExpr` and direct method handling.
+**Note**: The implemented version of `GetDirectMethodCallee()` has a simpler signature than originally planned:
 
 ```cpp
-// In the function that handles message send code generation
+// Implemented signature (simpler):
+llvm::Function *GetDirectMethodCallee(
+    const ObjCMethodDecl *OMD,
+    const ObjCContainerDecl *CD,
+    bool ReceiverCanBeNull,
+    bool ClassObjectCanBeUnrealized);
 
-// Check if optimization is enabled (this also checks Method is non-null and direct)
-if (CGM.shouldExposeSymbol(Method)) {
+// vs. Original plan (more complex):
+llvm::Function *GetDirectMethodCallee(
+    const ObjCMethodDecl *OMD,
+    const ObjCContainerDecl *CD,
+    llvm::Value *Receiver,
+    bool IsSuper,
+    const ObjCInterfaceDecl *ClassReceiver,
+    CodeGenFunction &CGF);
+```
 
-  // Handle variadic methods with inline nil checks
-  if (CGM.shouldHaveNilCheckInline(Method)) {
-    // ... variadic handling code from item 4 below ...
-  }
+**Why the change is better:**
+- Simpler interface: caller performs nullability analysis, GetDirectMethodCallee just dispatches
+- Better separation of concerns: analysis vs. dispatch
+- Easier to test and reason about
 
-  assert(CGM.shouldGenerateNilCheckThunk(Method));
-  // Non-variadic methods: use thunk optimization
-  // Perform nullability analysis
-  const Expr *Receiver = /* ... extract receiver expression ... */;
+**2. Call site emission in EmitMessageSend** (`CGObjCMac.cpp`):
 
-  if (CGM.isObjCReceiverNonNull(Receiver, *this)) {
-    // Case 1: Receiver is provably non-null
-    // → Direct call to true implementation
+The implementation takes a different approach - it integrates directly into `EmitMessageSend()` in `CGObjCMac.cpp`:
 
-    llvm::Function *TrueImpl = /* ... get implementation ... */;
-    llvm::CallInst *Call = Builder.CreateCall(TrueImpl, Args);
+```cpp
+// In EmitMessageSend (around line 2100)
 
-    // Set calling convention and attributes
-    Call->setCallingConv(TrueImpl->getCallingConv());
-    // ... other attributes ...
+if (Method && Method->isDirectMethod()) {
+    bool ClassObjectCanBeUnrealized =
+        Method->isClassMethod() &&
+        canClassObjectBeUnrealized(ClassReceiver, CGF);
 
-    return RValue::get(Call);
+    // Use GetDirectMethodCallee to decide whether to use implementation or thunk
+    Fn = GetDirectMethodCallee(Method, Method->getClassInterface(),
+                               ReceiverCanBeNull, ClassObjectCanBeUnrealized);
 
-  } else {
-    // Case 2: Receiver may be nil
-    // → Call through thunk
+    // Direct methods synthesize _cmd internally, don't need to pass it
+    RequiresSelValue = false;
 
-    llvm::Function *Thunk = CGM.getOrCreateObjCDirectThunk(Method);
-    llvm::CallInst *Call = Builder.CreateCall(Thunk, Args);
-
-    Call->setCallingConv(Thunk->getCallingConv());
-    // ... other attributes ...
-
-    return RValue::get(Call);
-  }
-  // llvm::unreachable();
-
-} else {
-  // Optimization disabled or not a direct method: use old behavior
-  // Call hidden symbol directly (with nil check in implementation)
-  // ... existing code ...
+    // ... rest of call emission ...
 }
 ```
+
+**Why This is Better:**
+- ✅ Integrates naturally into existing message send infrastructure
+- ✅ Reuses existing `ReceiverCanBeNull` calculation
+- ✅ Works with existing `NullReturnState` for variadic methods
+- ✅ Less code duplication
+
+**3. TODO: Update CGObjC.cpp for non-NeXT runtime** (⏸️ Still pending):
+
+For completeness, `CGObjC.cpp` may need updates to handle direct method calls in non-NeXT runtimes, but this is lower priority since `objc_direct` is primarily a NeXT/Apple runtime feature.
 
 #### Implementation Details:
 
@@ -927,9 +1101,14 @@ if (CGM.shouldHaveNilCheckInline(OMD)) {
   // Caller emits inline nil check before calling
 
   llvm::Value *Receiver = /* ... get receiver ... */;
+  bool IsSuper = /* determine if super call */;
+  const ObjCInterfaceDecl *ClassReceiver = /* get class receiver for class methods */;
 
-  // Check if receiver is non-null (via nullability analysis)
-  if (CGM.isObjCReceiverNonNull(ReceiverExpr, *this)) {
+  // Check if receiver can be null (returns true if nullable)
+  bool receiverCanBeNull = CGM.getObjCRuntime().canMessageReceiverBeNull(
+      *this, OMD, IsSuper, ClassReceiver, Receiver);
+
+  if (!receiverCanBeNull) {
     // Provably non-null: skip nil check, call directly
     llvm::Function *Impl = /* ... get exposed implementation ... */;
     llvm::CallInst *Call = Builder.CreateCall(Impl, Args);
@@ -1038,10 +1217,178 @@ The simpler approach avoids this complexity by always including `[self self]` in
 
 #### 5.1: Variadic Methods
 
-**Already handled in Phase 1-4:**
-- Excluded from thunk optimization (`canHaveNilCheckThunk()` returns false)
-- Keep hidden symbols with nil checks
-- Call sites emit inline nil check if needed
+**Problem**: Variadic methods cannot use thunks because `musttail` is incompatible with `va_start`/`va_end`.
+
+**Solution**: Variadic methods get exposed symbols WITHOUT nil checks in implementation. At call sites, inline nil checks are emitted using the existing `NullReturnState` infrastructure in `EmitMessageSend`.
+
+**Implementation in `EmitMessageSend` (CGObjCMac.cpp)**:
+
+The existing `NullReturnState` mechanism handles all the complexity of inline nil checks. We just need to set `RequiresNullCheck` appropriately.
+
+```cpp
+// Around line 2100 in EmitMessageSend
+
+bool RequiresNullCheck = false;
+bool RequiresClassRealization = false;
+
+// ... existing code ...
+
+if (Method && Method->isDirectMethod()) {
+    Fn = GetDirectMethodCallee(Method, Method->getClassInterface(),
+                               /*ReceiverExpr=*/nullptr, CGF);
+    RequiresSelValue = false;
+
+    // Handle inline nil checks for methods that can't use thunks (e.g., variadic)
+    if (CGM.shouldHaveNilCheckInline(Method)) {
+        if (Method->isInstanceMethod()) {
+            // Instance method: only need nil check
+            if (ReceiverCanBeNull) {
+                RequiresNullCheck = true;
+            }
+        } else {
+            // Class method: emit class realization FIRST, then nil check
+            // This matches the behavior in GenerateDirectMethodsPreconditionCheck
+            bool classCanBeUnrealized = canClassObjectBeUnrealized(ClassReceiver, CGF);
+
+            // Step 1: Emit class realization if needed (BEFORE nil check!)
+            if (classCanBeUnrealized) {
+                // Emit [self self] to realize the class
+                // This happens UNCONDITIONALLY (even if receiver might be null)
+                // to match GenerateDirectMethodsPreconditionCheck behavior
+
+                Selector SelfSel = CGF.getContext().Selectors.getNullarySelector(
+                    &CGF.getContext().Idents.get("self"));
+
+                CallArgList RealizationArgs;
+                RValue result = GeneratePossiblySpecializedMessageSend(
+                    CGF, ReturnValueSlot(), CGF.getContext().getObjCIdType(),
+                    SelfSel, Arg0, RealizationArgs, ClassReceiver, nullptr, true);
+
+                // Update Arg0 with the realized class
+                Arg0 = result.getScalarVal();
+                // Update ActualArgs[0] as well
+                ActualArgs[0] = CallArg(RValue::get(Arg0), Arg0Ty);
+            }
+
+            // Step 2: Set up nil check if needed (only for weak-linked classes)
+            if (ReceiverCanBeNull) {
+                RequiresNullCheck = true;
+            }
+        }
+    }
+}
+
+// ... existing code ...
+
+// Now emit nil check (happens AFTER class realization for class methods)
+if (RequiresNullCheck) {
+    nullReturn.init(CGF, Arg0);
+    // Now in callBB (non-null path)
+}
+
+// ... rest of existing code (selector emission, actual call, etc.) ...
+```
+
+**Why This Works**:
+
+The existing `NullReturnState` infrastructure in `EmitMessageSend` already handles everything we need:
+
+1. **`NullReturnState::init()`** creates two basic blocks:
+   - `msgSend.null-receiver`: Returns zero-initialized value
+   - `msgSend.call`: Executes the actual call
+
+2. **`NullReturnState::complete()`** merges results using PHI nodes:
+   - Handles all RValue types: void, scalar, aggregate, complex
+   - Returns appropriate zero-value for nil case
+   - Returns actual call result for non-nil case
+
+3. **Order for class methods** (matching `GenerateDirectMethodsPreconditionCheck`):
+   - Class realization happens BEFORE `nullReturn.init()` is called
+   - Class realization is UNCONDITIONAL (not inside the nil check)
+   - Nil check only happens for weak-linked classes (ReceiverCanBeNull)
+
+**Generated IR for Instance Method**:
+```llvm
+entry:
+  ; Nil check
+  %isNull = icmp eq ptr %self, null
+  br i1 %isNull, label %msgSend.null-receiver, label %msgSend.call
+
+msgSend.call:
+  ; Call the exposed implementation (no nil check in implementation)
+  %result = call i32 @"-[MyClass varMethod:]"(ptr %self, i32 %first, ...)
+  br label %msgSend.cont
+
+msgSend.null-receiver:
+  br label %msgSend.cont
+
+msgSend.cont:
+  %phi = phi i32 [ %result, %msgSend.call ], [ 0, %msgSend.null-receiver ]
+  ret i32 %phi
+```
+
+**Generated IR for Class Method**:
+```llvm
+entry:
+  ; Step 1: Class realization (UNCONDITIONAL)
+  %realized = call ptr @objc_msgSend(ptr %self, ptr @sel_self)
+
+  ; Step 2: Nil check (only for weak-linked)
+  %isNull = icmp eq ptr %realized, null
+  br i1 %isNull, label %msgSend.null-receiver, label %msgSend.call
+
+msgSend.call:
+  ; Step 3: Call the exposed implementation
+  %result = call i32 @"+[MyClass varMethod:]"(ptr %realized, i32 %first, ...)
+  br label %msgSend.cont
+
+msgSend.null-receiver:
+  br label %msgSend.cont
+
+msgSend.cont:
+  %phi = phi i32 [ %result, %msgSend.call ], [ 0, %msgSend.null-receiver ]
+  ret i32 %phi
+```
+
+**Benefits**:
+- ✅ Reuses existing, well-tested `NullReturnState` code
+- ✅ Handles all return types automatically (void, scalar, aggregate, complex)
+- ✅ No need to duplicate complex PHI node logic
+- ✅ Matches thunk behavior in `GenerateDirectMethodsPreconditionCheck`
+- ✅ Variadic methods still get the optimization (no nil check in implementation)
+
+**Test**:
+```objc
+// Variadic instance method
+- (int)varMethod:(int)first, ... __attribute__((objc_direct));
+
+int caller(MyClass *obj) {
+    return [obj varMethod:1, 2, 3];  // Inline nil check emitted
+}
+
+// CHECK: icmp eq ptr %obj, null
+// CHECK: br i1 %{{[0-9]+}}, label %msgSend.null-receiver, label %msgSend.call
+// CHECK: msgSend.call:
+// CHECK: call {{.*}} @"-[MyClass varMethod:]"
+// CHECK: msgSend.null-receiver:
+// CHECK: msgSend.cont:
+// CHECK: phi i32
+
+// Variadic class method (weak-linked)
++ (int)varClassMethod:(int)first, ... __attribute__((objc_direct));
+
+int caller2() {
+    return [WeakLinkedClass varClassMethod:1, 2, 3];
+}
+
+// CHECK: call ptr @objc_msgSend(ptr %self, ptr @sel_self)  ; Class realization
+// CHECK: icmp eq ptr %{{[0-9]+}}, null
+// CHECK: br i1 %{{[0-9]+}}, label %msgSend.null-receiver, label %msgSend.call
+// CHECK: msgSend.call:
+// CHECK: call {{.*}} @"+[WeakLinkedClass varClassMethod:]"
+// CHECK: msgSend.cont:
+// CHECK: phi i32
+```
 
 **Verify:**
 ```bash
@@ -1594,10 +1941,11 @@ Expected improvements:
 | `clang/include/clang/Basic/CodeGenOptions.def` | 0 | Add ObjCNilCheckThunk option |
 | `clang/include/clang/Driver/Options.td` | 0 | Add compiler flag |
 | `clang/include/clang/AST/DeclObjC.h` | 1 | Add canHaveNilCheckThunk() |
-| `clang/lib/CodeGen/CodeGenModule.h` | 1, 2, 3 | Add optimization checks, nullability analysis, thunk cache |
-| `clang/lib/CodeGen/CodeGenModule.cpp` | 1, 2, 3 | Implement helper functions |
-| `clang/lib/CodeGen/CGObjCRuntime.h` | 1 | Refactor symbol name generation |
-| `clang/lib/CodeGen/CGObjCRuntime.cpp` | 1 | Implement symbol name generation |
+| `clang/lib/CodeGen/CodeGenModule.h` | 1, 2 | Add optimization checks, nullability helpers |
+| `clang/lib/CodeGen/CodeGenModule.cpp` | 1, 2, 7 | Implement helper functions |
+| `clang/lib/CodeGen/CodeGenFunction.h` | 3 | Add StartObjCDirectThunk/FinishObjCDirectThunk |
+| `clang/lib/CodeGen/CGObjCRuntime.h` | 1, 2 | Refactor symbol name generation, add virtual dispatch helpers |
+| `clang/lib/CodeGen/CGObjCRuntime.cpp` | 1, 2 | Implement symbol name generation and stub dispatch helpers |
 | `clang/lib/CodeGen/CGObjCMac.cpp` | 1, 3 | Modify implementation generation, add thunk generation |
 | `clang/lib/CodeGen/CGObjC.cpp` | 1, 4 | Update visibility, integrate call site logic |
 | `clang/test/CodeGenObjC/expose-direct-method*.m` | 1, 2, 3, 6 | Add comprehensive tests (all prefixed with expose-direct-method) |
@@ -1876,14 +2224,15 @@ ninja check-clang-codegen-objc
 
 | Phase | Effort | Dependencies |
 |-------|--------|--------------|
-| Phase 0: Infrastructure | 1-2 hours | None |
-| Phase 1: Implementation Gen | 1-2 days | Phase 0 |
-| Phase 2: Nullability Analysis | 1 day | Phase 1 |
-| Phase 3: Thunk Generation | 2-3 days | Phases 1, 2 |
-| Phase 4: Call Site Logic | 1-2 days | Phases 1, 2, 3 |
-| Phase 5: Special Cases | 1 day | Phase 4 |
-| Phase 6: Tests | 1-2 days | All phases |
-| **Total** | **1.5-2 weeks** | |
+| Phase 0: Infrastructure | 1-2 hours | None | ✅ Complete |
+| Phase 1: Implementation Gen | 1-2 days | Phase 0 | ✅ Complete |
+| Phase 2: Stub Dispatch Helpers | 1 day | Phase 1 | ✅ Complete |
+| Phase 3: Thunk Generation | 2-3 days | Phases 1, 2 | ✅ Complete |
+| Phase 4: Call Site Logic | 1-2 days | Phases 1, 2, 3 | 🚧 In Progress |
+| Phase 5: Special Cases | 1 day | Phase 4 | ⏸️ Pending |
+| Phase 6: Tests | 1-2 days | All phases | ⏸️ Pending |
+| Phase 7: Optimize Dispatch | 1-2 days | All phases | ⏸️ Pending |
+| **Total** | **1.5-2 weeks** | | ~60% Complete |
 
 ### Milestones
 

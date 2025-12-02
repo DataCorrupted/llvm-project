@@ -781,10 +781,6 @@ void CodeGenFunction::StartObjCMethod(const ObjCMethodDecl *OMD,
                 OMD->getLocation(), StartLoc);
 
   if (OMD->isDirectMethod()) {
-    // This function is a direct call, it has to implement a nil check
-    // on entry.
-    //
-    // TODO: possibly have several entry points to elide the check
     CGM.getObjCRuntime().GenerateDirectMethodPrologue(*this, Fn, OMD, CD);
   }
 
