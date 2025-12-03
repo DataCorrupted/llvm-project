@@ -238,14 +238,14 @@ __attribute__((objc_direct_members))
 
 // CHECK-LABEL: define hidden void @"-[Foo setGetDynamic_setDirect:]"(ptr noundef %self, i32 noundef %getDynamic_setDirect)
 
-// CHECK-LABEL: define linkonce_odr hidden void @"-[Foo setGetDynamic_setDirect:]_thunk"(ptr %self, i32 %getDynamic_setDirect)
+// CHECK-LABEL: define linkonce_odr hidden void @"-[Foo setGetDynamic_setDirect:]_thunk"(ptr %self, i32 %0)
 // CHECK: entry:
 // CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
 // CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
 // CHECK: objc_direct_method.self_is_nil:
 // CHECK:   br label %dummy_ret_block
 // CHECK: objc_direct_method.cont:
-// CHECK:   musttail call void @"-[Foo setGetDynamic_setDirect:]"(ptr %self, i32 %getDynamic_setDirect)
+// CHECK:   musttail call void @"-[Foo setGetDynamic_setDirect:]"(ptr %self, i32 %0)
 // CHECK:   ret void
 // CHECK: dummy_ret_block:
 // CHECK:   ret void

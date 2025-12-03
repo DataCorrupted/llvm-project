@@ -4073,12 +4073,16 @@ CGObjCCommonMac::GenerateObjCDirectThunk(const ObjCMethodDecl *OMD,
   Thunk->setAttributes(ImplAttrs);
 
   // Build argument list for StartFunction
-  // NOTE: This is the key to making thunks work without AST bodies!
-  // We pass the method's parameter declarations to StartFunction,
-  // which creates allocas and sets up the function prologue.
+  // For musttail thunks, we MUST NOT pass regular method parameters
+  // to StartFunction because that causes them to be stored in local variables
+  // with storeStrong, which adds ARC retains (but musttail won't release it!). 
+  // This breaks the thunk's ARC transparency!
+  //
+  // We only pass 'self' so we can perform the nil check on it.
+  // All other parameters will be forwarded directly from Thunk->args().
   FunctionArgList FunctionArgs;
   FunctionArgs.push_back(OMD->getSelfDecl());
-  FunctionArgs.append(OMD->param_begin(), OMD->param_end());
+  // DO NOT append other parameters here - they would trigger storeStrong!
 
   // Get CGFunctionInfo for this method
   const CGFunctionInfo &FI = CGM.getTypes().arrangeObjCMethodDeclaration(OMD);
@@ -4089,8 +4093,8 @@ CGObjCCommonMac::GenerateObjCDirectThunk(const ObjCMethodDecl *OMD,
   // Start the ObjC direct thunk (sets up state and calls StartFunction)
   // After this call:
   // - CGF.Builder is positioned in the entry block
-  // - Parameters are accessible (e.g.,
-  // CGF.GetAddrOfLocalVar(OMD->getSelfDecl()))
+  // - 'self' parameter is accessible via CGF.GetAddrOfLocalVar(OMD->getSelfDecl())
+  // - Other parameters must be accessed directly from Thunk->args()
   // - Return value storage is set up (if needed)
   // - CurCodeDecl/CurFuncDecl are set to OMD
   CGF.StartObjCDirectThunk(OMD, Thunk, FI, FunctionArgs);

@@ -820,12 +820,16 @@ CGObjCCommonMac::GenerateThunkForDirectMethod(
   Thunk->setAttributes(ImplAttrs);
 
   // Build argument list for StartFunction
-  // (We need actual VarDecl parameters, not just LLVM args)
+  // CRITICAL: For musttail thunks, we MUST NOT pass regular method parameters
+  // to StartFunction because that causes them to be stored in local variables
+  // with storeStrong, which adds ARC retains/releases. This breaks the thunk's
+  // ARC transparency!
+  //
+  // We only pass 'self' so we can perform the nil check on it.
+  // All other parameters will be forwarded directly from Thunk->args().
   FunctionArgList FunctionArgs;
   FunctionArgs.push_back(OMD->getSelfDecl());
-  if (!OMD->isDirectMethod())
-    FunctionArgs.push_back(OMD->getCmdDecl());
-  FunctionArgs.append(OMD->param_begin(), OMD->param_end());
+  // DO NOT append other parameters here - they would trigger storeStrong!
 
   // Get CGFunctionInfo for this method
   const CGFunctionInfo &FI = CGM.getTypes().arrangeObjCMethodDeclaration(OMD);
