@@ -4096,6 +4096,10 @@ static void RenderObjCOptions(const ToolChain &TC, const Driver &D,
     }
   }
 
+  // Forward -fobjc-expose-direct-methods to cc1
+  if (Args.hasArg(options::OPT_fobjc_expose_direct_methods))
+    CmdArgs.push_back("-fobjc-expose-direct-methods");
+
   // When ObjectiveC legacy runtime is in effect on MacOSX, turn on the option
   // to do Array/Dictionary subscripting by default.
   if (Arch == llvm::Triple::x86 && T.isMacOSX() &&
@@ -4143,7 +4147,7 @@ static void RenderObjCOptions(const ToolChain &TC, const Driver &D,
     if (Arg &&
         Arg->getOption().matches(
             options::OPT_fno_objc_convert_messages_to_runtime_calls))
-      CmdArgs.push_back("-fno-objc-convert-messages-to-runtime-calls");
+      CmdArgs.push_back("-fno-objc-convert-messages-to-runtime-calls"); 
   }
 
   // -fobjc-infer-related-result-type is the default, except in the Objective-C
