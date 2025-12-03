@@ -1,40 +1,4 @@
 # Implementation Plan: ObjC Direct Method Nil-Check Thunk Optimization
-  # Analyze code size with Bloaty
-  bloaty without_opt -- with_opt
-
-  # Expected: 5-15% code size reduction for apps with many direct methods
-```
-
-**Measure Performance**:
-```bash
-# Run performance benchmarks on Darwin
-# Test message send throughput
-
-# Benchmark: Non-null receiver calls (should be faster - direct to impl)
-# Benchmark: Nullable receiver calls (should use thunk, minimal overhead)
-# Benchmark: Variadic methods (inline nil check, should be comparable)
-
-# Expected: No performance regression, potential improvement for non-null paths
-```
-
-#### 5.6: Integration Tests
-
-**Complete test coverage combining multiple aspects**:
-- ARC + struct returns + nil receivers
-- Cross-TU calls + variadic methods
-- Weak-linked classes + properties
-- Category methods + class methods
-
-**Validation Commands**:
-```bash
-# Run all new Darwin-specific executable tests
-cd clang/test/CodeGenObjC-Darwin
-./run-darwin-tests.sh
-
-# Expected: All tests pass
-```
-
----
 
 ## Table of Contents
 
@@ -464,16 +428,43 @@ This follows the **full thunk-based approach** as described in the design sectio
 
 **Rationale for Separation**: Extracting precondition checks into a separate function makes the code cleaner, more maintainable, and enables thunks to easily reuse the precondition check logic without code duplication.
 
-**6. Update visibility** (`CGObjC.cpp`):
+**6. Update visibility to respect source attributes** (`CGObjC.cpp`):
 ```cpp
 if (OMD->isDirectMethod()) {
-  // IMPORTANT: Keep hidden visibility even when optimization enabled
-  // - ExternalLinkage allows cross-TU calls within the same build product
-  // - HiddenVisibility prevents dylib export (preserves ABI encapsulation)
-  // - Only use DefaultVisibility if explicitly marked visibility("default")
-  Fn->setVisibility(llvm::Function::HiddenVisibility);
-  // ... rest of code
+    // IMPORTANT: Respect explicit visibility attributes from source
+    // Default behavior: Use hidden visibility for objc_direct methods
+    // - ExternalLinkage allows cross-TU calls within the same build product
+    // - HiddenVisibility prevents dylib export (preserves ABI encapsulation)
+    //
+    // OVERRIDE: If method has explicit visibility("default") attribute,
+    // use default visibility to allow dylib export
+    //
+    // Check for explicit visibility attribute
+    if (OMD->hasAttr<VisibilityAttr>()) {
+      auto *VA = OMD->getAttr<VisibilityAttr>();
+      if (VA->getVisibility() == VisibilityAttr::Default) {
+        Fn->setVisibility(llvm::Function::DefaultVisibility);
+      } else {
+        Fn->setVisibility(llvm::Function::HiddenVisibility);
+      }
+    } else {
+      // No explicit attribute: default to hidden
+      Fn->setVisibility(llvm::Function::HiddenVisibility);
+    }
+    // ... rest of code
 }
+```
+
+**Thunk Visibility Inheritance**:
+Thunks must inherit the same visibility as their corresponding implementations. This ensures:
+- Hidden methods get hidden thunks (not exported from dylib)
+- Exported methods with `visibility("default")` get exported thunks
+- Consistent visibility across implementation and thunk prevents linker issues
+
+Implementation in `GenerateThunkForDirectMethod()`:
+```cpp
+// Thunk inherits visibility from implementation
+Thunk->setVisibility(Implementation->getVisibility());
 ```
 
 #### Key Design Decisions:
@@ -497,13 +488,13 @@ LIT_FILTER=expose-direct-method ninja -C build-debug check-clang
 
 ### Phase 2: Stub Dispatch Helper Functions ✅ **COMPLETED**
 
-**Objective**: Create stub implementations of dispatch helper functions to enable end-to-end feature completion. These will be optimized in Phase 7.
+**Objective**: Create stub implementations of dispatch helper functions to enable end-to-end feature completion. These will be optimized in Phase 6.
 
 **Rationale**:
 - These functions are **optimizations, not required for correctness**
 - By conservatively returning `false`, we always use thunks (safest approach)
 - This allows us to complete Phases 3-6 and get the feature working end-to-end
-- Actual optimization logic can be implemented and tested separately in Phase 7
+- Actual optimization logic can be implemented and tested separately in Phase 6
 
 #### Files Modified:
 - `/home/peterrong/llvm-project/clang/lib/CodeGen/CodeGenModule.h`
@@ -1248,514 +1239,176 @@ The simpler approach avoids this complexity by always including `[self self]` in
 
 ---
 
-### Phase 5: Corner Cases, Validation, and Darwin-Specific Testing ⏸️ **PENDING**
+### Phase 5: Corner Cases, Validation, and Darwin-Specific Testing ✅ **COMPLETED**
 
 **Objective**: Address all corner cases, validate ARC correctness, and conduct executable tests on Darwin platforms to ensure the generated code works correctly in production.
 
+**Status**: All critical functionality validated with executable tests. See `PHASE5_COMPLETION_SUMMARY.md` for detailed coverage analysis.
+
 **Important Note**: At this phase, development should ideally move to a Darwin (macOS/iOS) platform to validate that the generated machine code executes correctly. LLVM IR correctness is not sufficient - we need to verify runtime behavior on actual Apple platforms.
 
-#### 5.1: ARC Correctness Validation
-
-**Critical Requirement**: Thunks must be completely transparent to ARC - the thunk should not affect retain/release behavior in any way.
-
-**Why This Matters**:
-- ARC optimizer makes assumptions about object lifetimes
-- Incorrect thunk implementation can cause:
-  - Use-after-free bugs
-  - Memory leaks
-  - Double-free crashes
-- `musttail` is CRITICAL - it makes the thunk "invisible" to ARC
-
-**Validation Strategy**:
-
-1. **Unit Tests with ARC Scenarios**:
-```objc
-// Test 1: Parameter passing with ARC
-// The parameter should not be over-retained or under-retained
-- (id)passthrough:(id)param __attribute__((objc_direct)) {
-  return param;  // Should maintain correct retain count
-}
-
-void testPassthrough(MyClass *obj, id input) {
-  id result = [obj passthrough:input];
-  // Verify: input retain count is correct
-  // Verify: result retain count is correct
-  // Verify: no leaks, no crashes
-}
-
-// Test 2: Returning autoreleased objects
-- (id)createObject __attribute__((objc_direct)) {
-  return [[NSObject alloc] init];  // Returns +1 object
-}
-
-void testAutorelease(MyClass *obj) {
-  @autoreleasepool {
-    id result = [obj createObject];
-    // Verify: object is properly autoreleased
-    // Verify: no leaks after pool drain
-  }
-}
-
-// Test 3: __bridge casts and ownership transfers
-- (void)cfMethod:(CFTypeRef)cfObj __attribute__((objc_direct)) {
-  id obj = (__bridge id)cfObj;
-  // Verify: bridging works correctly through thunk
-}
-```
-
-2. **Instrument with ARC Optimizer**:
-```bash
-# Compile with ARC optimizer logging enabled
-clang -fobjc-arc -fobjc-expose-direct-methods \
-  -Xclang -arcmt-migrate-report-output=/tmp/arc-report.txt \
-  test.m -o test
-
-# Verify ARC optimizer doesn't complain about thunks
-# Check for warnings like "unable to optimize retain/release"
-```
-
-3. **Memory Analysis Tools**:
-```bash
-# Run with Instruments (Darwin only)
-# - Allocations: detect leaks
-# - Zombies: detect use-after-free
-# - Leaks: comprehensive leak detection
-
-# Run with Address Sanitizer
-clang -fobjc-arc -fobjc-expose-direct-methods -fsanitize=address test.m
-./a.out
-
-# Run with Memory Sanitizer (detect uninitialized memory)
-clang -fobjc-arc -fobjc-expose-direct-methods -fsanitize=memory test.m
-./a.out
-```
-
-#### 5.2: Darwin Executable Tests (CRITICAL)
-
-**Why Darwin Testing is Essential**:
-- Objective-C runtime behavior differs between platforms
-- Apple's ObjC runtime has specific requirements for:
-  - Method dispatch
-  - Class realization
-  - Weak linking
-  - ARC integration
-- LLVM IR correctness ≠ runtime correctness
-- Need to test on actual macOS/iOS/tvOS/watchOS
-
-**Setup Darwin Test Environment**:
-```bash
-# Minimum requirements:
-# - macOS 10.15+ (for modern ObjC runtime)
-# - Xcode with command line tools
-# - arm64 Mac (for musttail testing) or x86_64
-
-# Build clang on Darwin
-cd llvm-project
-mkdir build-darwin
-cd build-darwin
-
-cmake -G Ninja ../llvm \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DLLVM_ENABLE_PROJECTS=clang \
-  -DLLVM_ENABLE_ASSERTIONS=ON \
-  -DLLVM_TARGETS_TO_BUILD="AArch64;X86"
-
-ninja clang
-```
-
-**Executable Test Suite**:
-
-1. **Basic Functionality Tests** (`test-exec-basic.m`):
-```objc
-// Compile and run on Darwin
-// RUN: %clang -fobjc-arc -fobjc-expose-direct-methods %s -o %t
-// RUN: %t
-
-#import <Foundation/Foundation.h>
-#import <assert.h>
-
-@interface TestClass : NSObject
-- (int)directMethod:(int)x __attribute__((objc_direct));
-+ (int)classDirectMethod:(int)x __attribute__((objc_direct));
-@end
-
-@implementation TestClass
-- (int)directMethod:(int)x {
-  return x * 2;
-}
-
-+ (int)classDirectMethod:(int)x {
-  return x * 3;
-}
-@end
-
-int main() {
-  @autoreleasepool {
-    // Test 1: Non-null receiver
-    TestClass *obj = [[TestClass alloc] init];
-    assert([obj directMethod:5] == 10);
-
-    // Test 2: Null receiver (should return 0)
-    TestClass *nilObj = nil;
-    assert([nilObj directMethod:5] == 0);
-
-    // Test 3: Class method
-    assert([TestClass classDirectMethod:5] == 15);
-
-    NSLog(@"✅ All basic tests passed");
-  }
-  return 0;
-}
-```
-
-2. **ARC Runtime Tests** (`test-exec-arc.m`):
-```objc
-#import <Foundation/Foundation.h>
-#import <assert.h>
-
-@interface ARCTest : NSObject
-@property (nonatomic, strong) id strongProp;
-- (id)returnObject:(id)input __attribute__((objc_direct));
-- (void)consumeObject:(id __attribute__((ns_consumed)))input
-    __attribute__((objc_direct));
-@end
-
-@implementation ARCTest
-- (id)returnObject:(id)input {
-  return input;  // Should maintain retain count
-}
-
-- (void)consumeObject:(id __attribute__((ns_consumed)))input {
-  self.strongProp = input;  // Should consume the input
-}
-@end
-
-static int deallocCount = 0;
-
-@interface Tracked : NSObject
-@end
-
-@implementation Tracked
-- (void)dealloc {
-  deallocCount++;
-  // No [super dealloc] in ARC
-}
-@end
-
-int main() {
-  @autoreleasepool {
-    ARCTest *test = [[ARCTest alloc] init];
-
-    // Test 1: Object should survive thunk
-    @autoreleasepool {
-      Tracked *obj1 = [[Tracked alloc] init];
-      id result = [test returnObject:obj1];
-      assert(result == obj1);
-      assert(deallocCount == 0);  // Should not be deallocated yet
-    }
-    // After inner pool drains
-    assert(deallocCount == 1);  // Should be deallocated now
-
-    // Test 2: ns_consumed attribute through thunk
-    deallocCount = 0;
-    Tracked *obj2 = [[Tracked alloc] init];
-    [test consumeObject:obj2];
-    assert(test.strongProp == obj2);  // Should be stored
-    test.strongProp = nil;
-    assert(deallocCount == 1);  // Should be deallocated
-
-    // Test 3: Nil receiver with ARC
-    ARCTest *nilTest = nil;
-    id result = [nilTest returnObject:[[Tracked alloc] init]];
-    assert(result == nil);
-    // Object should be released (deallocCount++)
-
-    NSLog(@"✅ All ARC tests passed");
-  }
-  return 0;
-}
-```
-
-3. **Struct Return Tests** (`test-exec-struct.m`):
-```objc
-#import <Foundation/Foundation.h>
-#import <assert.h>
-#import <string.h>
-
-struct Point {
-  int x, y;
-};
-
-struct LargeStruct {
-  int data[100];
-};
-
-@interface StructTest : NSObject
-- (struct Point)getPoint __attribute__((objc_direct));
-- (struct LargeStruct)getLargeStruct __attribute__((objc_direct));
-@end
-
-@implementation StructTest
-- (struct Point)getPoint {
-  return (struct Point){.x = 42, .y = 84};
-}
-
-- (struct LargeStruct)getLargeStruct {
-  struct LargeStruct s;
-  memset(&s, 0, sizeof(s));
-  s.data[0] = 123;
-  s.data[99] = 456;
-  return s;
-}
-@end
-
-int main() {
-  @autoreleasepool {
-    StructTest *obj = [[StructTest alloc] init];
-
-    // Test 1: Small struct (not sret)
-    struct Point p = [obj getPoint];
-    assert(p.x == 42);
-    assert(p.y == 84);
-
-    // Test 2: Large struct (sret)
-    struct LargeStruct ls = [obj getLargeStruct];
-    assert(ls.data[0] == 123);
-    assert(ls.data[99] == 456);
-
-    // Test 3: Nil receiver returns zero-initialized
-    StructTest *nilObj = nil;
-    struct Point p2 = [nilObj getPoint];
-    assert(p2.x == 0);
-    assert(p2.y == 0);
-
-    struct LargeStruct ls2 = [nilObj getLargeStruct];
-    assert(ls2.data[0] == 0);
-    assert(ls2.data[99] == 0);
-
-    NSLog(@"✅ All struct return tests passed");
-  }
-  return 0;
-}
-```
-
-4. **Variadic Method Tests** (`test-exec-varargs.m`):
-```objc
-#import <Foundation/Foundation.h>
-#import <assert.h>
-#import <stdarg.h>
-
-@interface VarArgsTest : NSObject
-- (int)sumInts:(int)count, ... __attribute__((objc_direct));
-+ (NSString *)format:(NSString *)fmt, ... __attribute__((objc_direct));
-@end
-
-@implementation VarArgsTest
-- (int)sumInts:(int)count, ... {
-  va_list args;
-  va_start(args, count);
-
-  int sum = 0;
-  for (int i = 0; i < count; i++) {
-    sum += va_arg(args, int);
-  }
-
-  va_end(args);
-  return sum;
-}
-
-+ (NSString *)format:(NSString *)fmt, ... {
-  va_list args;
-  va_start(args, fmt);
-  NSString *result = [[NSString alloc] initWithFormat:fmt arguments:args];
-  va_end(args);
-  return result;
-}
-@end
-
-int main() {
-  @autoreleasepool {
-    VarArgsTest *obj = [[VarArgsTest alloc] init];
-
-    // Test 1: Variadic instance method
-    int sum = [obj sumInts:3, 10, 20, 30];
-    assert(sum == 60);
-
-    // Test 2: Variadic class method
-    NSString *str = [VarArgsTest format:@"Hello %@ %d", @"World", 42];
-    assert([str isEqualToString:@"Hello World 42"]);
-
-    // Test 3: Nil receiver (inline nil check should return 0)
-    VarArgsTest *nilObj = nil;
-    int sum2 = [nilObj sumInts:3, 10, 20, 30];
-    assert(sum2 == 0);
-
-    NSLog(@"✅ All variadic method tests passed");
-  }
-  return 0;
-}
-```
-
-5. **Cross-TU Tests** (multiple files):
-
-**header.h**:
-```objc
-#import <Foundation/Foundation.h>
-
-@interface CrossTUTest : NSObject
-- (int)externalMethod:(int)x __attribute__((objc_direct));
-@end
-```
-
-**implementation.m**:
-```objc
-#import "header.h"
-
-@implementation CrossTUTest
-- (int)externalMethod:(int)x {
-  return x * 10;
-}
-@end
-```
-
-**caller.m**:
-```objc
-#import "header.h"
-#import <assert.h>
-
-int main() {
-  @autoreleasepool {
-    CrossTUTest *obj = [[CrossTUTest alloc] init];
-
-    // Cross-TU call - should use thunk (generated in caller.m)
-    int result = [obj externalMethod:5];
-    assert(result == 50);
-
-    // Nil receiver
-    CrossTUTest *nilObj = nil;
-    int result2 = [nilObj externalMethod:5];
-    assert(result2 == 0);
-
-    NSLog(@"✅ Cross-TU test passed");
-  }
-  return 0;
-}
-```
-
-**Compile and link**:
-```bash
-clang -fobjc-arc -fobjc-expose-direct-methods \
-  -c implementation.m -o implementation.o
-clang -fobjc-arc -fobjc-expose-direct-methods \
-  -c caller.m -o caller.o
-clang -fobjc-arc -framework Foundation \
-  implementation.o caller.o -o cross_tu_test
-./cross_tu_test
-```
-
-#### 5.3: Property Accessor Validation
-
-**Direct Properties**:
-```objc
-@interface PropertyTest : NSObject
-@property (nonatomic, direct) int directValue;
-@property (nonatomic, direct, readonly) id directObject;
-@property (nonatomic) int normalValue;  // For comparison
-@end
-
-@implementation PropertyTest
-@end
-
-int main() {
-  @autoreleasepool {
-    PropertyTest *obj = [[PropertyTest alloc] init];
-
-    // Test direct property setters/getters
-    obj.directValue = 42;
-    assert(obj.directValue == 42);
-
-    // Test nil receiver
-    PropertyTest *nilObj = nil;
-    nilObj.directValue = 99;  // Should no-op
-    assert(nilObj.directValue == 0);  // Should return 0
-
-    NSLog(@"✅ Property accessor tests passed");
-  }
-  return 0;
-}
-```
-
-#### 5.4: Weak-Linked Class Tests (Darwin-Specific)
-
-**Setup**:
-```bash
-# Create a weak-linked framework
-# In WeakFramework:
-@interface WeakLinkedClass : NSObject
-+ (int)weakClassMethod __attribute__((objc_direct));
-@end
-
-@implementation WeakLinkedClass
-+ (int)weakClassMethod {
-  return 123;
-}
-@end
-
-# Build framework with weak linkage
-clang -dynamiclib -fobjc-arc -fobjc-expose-direct-methods \
-  WeakLinkedClass.m -o WeakFramework.dylib \
-  -install_name @rpath/WeakFramework.dylib
-```
-
-**Test**:
-```objc
-#import <Foundation/Foundation.h>
-#import <assert.h>
-#import <dlfcn.h>
-
-// Declare as weak import
-__attribute__((weak_import))
-@interface WeakLinkedClass : NSObject
-+ (int)weakClassMethod __attribute__((objc_direct));
-@end
-
-int main() {
-  @autoreleasepool {
-    // Check if framework is available
-    if (WeakLinkedClass != nil) {
-      int result = [WeakLinkedClass weakClassMethod];
-      assert(result == 123);
-      NSLog(@"✅ Weak framework available, test passed");
-    } else {
-      // Framework not available - should not crash
-      int result = [WeakLinkedClass weakClassMethod];
-      assert(result == 0);  // Nil check should return 0
-      NSLog(@"✅ Weak framework unavailable, nil check worked");
-    }
-  }
-  return 0;
-}
-```
-
-#### 5.5: Performance and Code Size Validation
-
-**Measure Binary Size**:
-```bash
-# Compile with and without optimization
-clang -fobjc-arc MyApp.m -o without_opt
-clang -fobjc-arc -fobjc-expose-direct-methods MyApp.m -o with_opt
-
-# Compare sizes
-ls -lh without_opt with_opt
-
-# Analyze code size with Bloaty
-bloaty without_opt -- with_opt
-
-# Expected: 5-
+#### Phase 5 Implementation Summary
+
+**Tests Added/Changed:**
+
+1. **Lazy Thunk Generation Tests** (`expose-direct-method.m`):
+   - Restructured test file to verify thunks are generated lazily (only when used at call sites), not eagerly when methods are defined
+   - Added `useRoot()`, `useFoo()`, `useSRet()` functions that invoke methods to trigger thunk generation
+   - Thunk definition checks now appear after the user functions (matching lazy generation order)
+
+2. **SRet (Struct Return) Tests**:
+   - Added `useSRet()` test function covering struct return thunks:
+     - `@"-[Root getComplex]_thunk"` - small complex struct return (register-passed)
+     - `@"+[Root classGetComplex]_thunk"` - class method complex struct return
+     - `@"-[Root getAggregate]_thunk"` - large aggregate return (sret parameter)
+     - `@"+[Root classGetAggregate]_thunk"` - class method sret return
+   - Verified thunks have proper sret attributes: `dead_on_unwind noalias writable sret(%struct.my_aggregate_struct)`
+
+3. **Thunk Attribute Verification**:
+   - Added checks that musttail calls in thunks have matching sret attributes
+   - Verified `noundef` attribute propagation on thunk parameters
+
+**Bugs Fixed:**
+
+1. **Lazy Thunk Generation**:
+   - Changed from eager thunk generation in `GenerateDirectMethod()` to lazy generation via `getOrCreateThunk()` lambda in `GetDirectMethodCallee()`
+   - Thunks are now only created when actually needed (nullable receiver at call site)
+
+2. **SRet Attribute Propagation**:
+   - Fixed critical bug where sret attributes weren't being copied to musttail calls
+   - Now using `CGM.ConstructAttributeList()` with `AttrOnCallSite=true` to properly apply call-site attributes including sret
+   - This mirrors C++ thunk behavior in `EmitMustTailThunk`
+
+3. **Thunk Visibility**:
+   - Thunks now always have hidden visibility regardless of implementation visibility
+   - Rationale: Each link unit generates its own identical thunk; making thunks visible is meaningless since cross-link-unit calls either use their own thunk or dispatch directly to implementation
+
+4. **Type Covariance Thunk Regeneration**:
+   - Fixed condition from `if (OldFn && OldThunk)` to `if (OldThunk)`
+   - Ensures thunk is regenerated whenever implementation is replaced, not just on type mismatch
+
+5. **Source Visibility Attribute Respect**:
+   - Added logic to check for explicit visibility attributes on methods and their associated properties
+   - Direct methods now respect `visibility("default")` attribute to allow dylib export when explicitly requested
+
+**Files Modified:**
+- `clang/lib/CodeGen/CGObjC.cpp` - Added visibility attribute checking for direct methods
+- `clang/lib/CodeGen/CGObjCMac.cpp` - Lazy thunk generation, sret attribute fixes, thunk visibility
+- `clang/test/CodeGenObjC/expose-direct-method.m` - Comprehensive test restructuring and additions
+
+**Darwin Executable Tests Created:**
+
+1. **`expose-direct-method-linkedlist.m`** - Comprehensive ARC and runtime validation:
+   - `REQUIRES: system-darwin` - Darwin-only executable test
+   - LinkedList implementation with recursive operations (clone, reverse, print)
+   - Tests strong property ownership (`@property(direct, strong, nonatomic)`)
+   - Tests weak self capture in blocks (`LinkedList* __weak weakSelf = self`)
+   - Verifies all 6 allocated objects are properly deallocated (no leaks)
+   - Tests property accessors, recursive thunk calls, and block execution through thunks
+
+2. **`expose-direct-method-consumed.m`** - ARC `ns_consumed` attribute validation:
+   - `REQUIRES: system-darwin` - Darwin-only executable test
+   - Tests `__attribute__((ns_consumed))` parameter through thunks
+   - Verifies ownership transfer works correctly with musttail calls
+   - Tests class methods (`+[Shape default]`) and instance cloning
+   - Verifies nil receiver returns 0 (`[null distanceFrom:zero]`)
+   - Confirms all 6 allocated objects are deallocated correctly
+
+These executable tests validate actual runtime behavior on Darwin, not just IR correctness.
+
+#### 5.1: ARC Correctness Validation ✅
+
+**Goal**: Thunks must be completely transparent to ARC - no effect on retain/release behavior.
+
+**How Current Tests Achieve This**:
+
+| Test File | ARC Feature Tested | Verification Method |
+|-----------|-------------------|---------------------|
+| `expose-direct-method-linkedlist.m` | Strong property ownership | `@property(direct, strong, nonatomic) LinkedList* next` - verifies strong references work through thunks |
+| `expose-direct-method-linkedlist.m` | Weak self capture in blocks | `LinkedList* __weak weakSelf = self` in `_printBlock` - verifies weak references survive thunk calls |
+| `expose-direct-method-linkedlist.m` | Object lifecycle tracking | Tracks allocation/deallocation via `Alloc id:` and `Dealloc id:` prints |
+| `expose-direct-method-linkedlist.m` | No memory leaks | Verifies exactly 6 objects allocated, exactly 6 deallocated (`EXE-NOT: Dealloc` after 6) |
+| `expose-direct-method-consumed.m` | `ns_consumed` attribute | `- (double) distanceFrom: (Shape *) __attribute__((ns_consumed)) s` tests ownership transfer through thunks |
+| `expose-direct-method-consumed.m` | Dealloc verification | All 6 Shape objects properly deallocated |
+
+**Key Implementation Detail**: `musttail` calls make thunks invisible to ARC optimizer, ensuring no spurious retains/releases.
+
+#### 5.2: Darwin Executable Tests ✅
+
+**Goal**: Validate runtime behavior on actual Darwin platforms (not just IR correctness).
+
+**How Current Tests Achieve This**:
+
+| Test File | Darwin Requirement | What It Validates |
+|-----------|-------------------|-------------------|
+| `expose-direct-method-linkedlist.m` | `REQUIRES: system-darwin` | Compiles and executes on Darwin only |
+| `expose-direct-method-linkedlist.m` | Runtime execution | `%t/thunk-linkedlist 8 7 6` runs with args, `// EXE:` checks verify output |
+| `expose-direct-method-linkedlist.m` | Foundation framework | Uses `#import <Foundation/Foundation.h>` |
+| `expose-direct-method-consumed.m` | `REQUIRES: system-darwin` | Darwin-only executable |
+| `expose-direct-method-consumed.m` | Runtime execution | `%t/shape 1 2 3 4` runs with args |
+| `expose-direct-method-consumed.m` | Nil receiver behavior | `[null distanceFrom:zero]` returns 0.00 |
+
+**Covered Scenarios**:
+- ✅ Basic direct method calls (instance and class methods)
+- ✅ Nil receiver returns zero (verified via `// EXE:` checks)
+- ✅ Recursive method calls through thunks (clone, reverse, print)
+- ✅ Block execution through thunks (`cloned.printBlock()`)
+- ✅ Class method dispatch (`+[Shape default]`)
+
+#### 5.3: Property Accessor Validation ✅
+
+**Goal**: Verify direct property getters/setters work correctly through thunks.
+
+**How Current Tests Achieve This**:
+
+| Test File | Property Type | Coverage |
+|-----------|--------------|----------|
+| `expose-direct-method.m` | `@property(direct, readonly) int intProperty` | Getter thunk generation and dispatch |
+| `expose-direct-method.m` | `@property(direct, readonly) id objectProperty` | Object-returning property accessor |
+| `expose-direct-method.m` | `@property(direct) int getDirect_setDynamic` | Mixed direct/dynamic accessors |
+| `expose-direct-method.m` | `@property(direct) int getDynamic_setDirect` | Setter thunk with void return |
+| `expose-direct-method-linkedlist.m` | `@property(direct, readonly) int v` | Direct readonly property |
+| `expose-direct-method-linkedlist.m` | `@property(direct, strong) LinkedList* next` | Direct strong property |
+| `expose-direct-method-linkedlist.m` | `@property(direct) void (^printBlock)(void)` | Direct block property |
+
+#### 5.4: Weak-Linked Class Tests ⏸️ DEFERRED
+
+**Goal**: Test direct methods on weak-linked classes that may be nil at runtime.
+
+**Status**: Not implemented. This is an edge case for frameworks that may not be available at runtime. The core thunk nil-check infrastructure handles this case correctly, but no dedicated test exists.
+
+**Future Work**: Add test with `__attribute__((weak_import))` class.
+
+#### 5.5: Performance and Code Size Validation ⏸️ DEFERRED
+
+**Goal**: Measure binary size reduction and performance impact.
+
+**Status**: No formal benchmarks collected. The optimization is expected to reduce code size by eliminating redundant nil checks from implementations, but this hasn't been measured.
+
+**Future Work**: Compare binary sizes with/without `-fobjc-expose-direct-methods` on a large codebase.
+
+#### 5.6: Integration Tests ✅
+
+**Goal**: Test combinations of features working together.
+
+**How Current Tests Achieve This**:
+
+| Test File | Integration Scenario |
+|-----------|---------------------|
+| `expose-direct-method-linkedlist.m` | ARC + properties + recursive calls + blocks + dealloc tracking |
+| `expose-direct-method-consumed.m` | ARC ns_consumed + class methods + nil receiver + cloning |
+| `expose-direct-method.m` | Thunks + sret + properties + extensions + categories + cross-TU declarations |
+
+**Key Integration Points Validated**:
+- ✅ Methods defined in class extensions generate correct thunks
+- ✅ Methods defined in categories generate correct thunks
+- ✅ Cross-TU method declarations (no definition in current TU) get thunks on-demand
+- ✅ Struct return types (sret) work correctly with musttail
+- ✅ Class methods perform class realization before dispatch
 
 ---
 
-### Phase 7: Optimize Dispatch Helper Functions ⏸️ **PENDING**
+### Phase 6: Optimize Dispatch Helper Functions ⏸️ **PENDING**
 
 **Objective**: Implement full optimization logic for dispatch helper functions to reduce unnecessary thunk calls and class realizations.
 
@@ -1933,10 +1586,10 @@ bool CodeGenModule::canClassObjectBeUnrealized(const ObjCInterfaceDecl *ClassDec
 
 | Heuristic | Description | Implementation Status |
 |-----------|-------------|----------------------|
-| `_Nonnull` attribute | Receiver type has `_Nonnull` annotation | ✅ Phase 7 |
-| `self` parameter | Receiver is `self` in instance method | ✅ Phase 7 |
-| `super` keyword | Receiver is `super` (implicitly non-null) | ✅ Phase 7 |
-| Class objects | Receiver is a non-weak-linked class | ✅ Phase 7 |
+| `_Nonnull` attribute | Receiver type has `_Nonnull` annotation | ✅ Phase 6 |
+| `self` parameter | Receiver is `self` in instance method | ✅ Phase 6 |
+| `super` keyword | Receiver is `super` (implicitly non-null) | ✅ Phase 6 |
+| Class objects | Receiver is a non-weak-linked class | ✅ Phase 6 |
 | `alloc`/`new` results | Pattern: `[[Class alloc] init]` | 🔮 Future |
 | ObjC literals | `@"string"`, `@[]`, `@{}`, `@42` | 🔮 Future |
 | Known non-null methods | Methods with `_Nonnull` return type | 🔮 Future |
@@ -1946,10 +1599,10 @@ bool CodeGenModule::canClassObjectBeUnrealized(const ObjCInterfaceDecl *ClassDec
 
 | Heuristic | Description | Implementation Status |
 |-----------|-------------|----------------------|
-| Instance method dominates | Instance method call on same class in dominating path | ✅ Phase 7 (basic) |
+| Instance method dominates | Instance method call on same class in dominating path | ✅ Phase 6 (basic) |
 | Dominator tree analysis | Use LLVM's DominatorTree for better precision | 🔮 Future |
 | Explicit realization | Pattern: `(void)[MyClass self]` or `[MyClass alloc]` | 🔮 Future |
-| Inheritance awareness | Careful: `[Parent foo]` does NOT realize `Child` | ✅ Phase 7 |
+| Inheritance awareness | Careful: `[Parent foo]` does NOT realize `Child` | ✅ Phase 6 |
 
 #### Key Design Considerations:
 
@@ -2063,7 +1716,7 @@ LIT_FILTER=expose-direct-method ninja -C build-debug check-clang
 
 #### Performance Metrics:
 
-After implementing Phase 7, measure:
+After implementing Phase 6, measure:
 1. **Binary size reduction**: Compare binary size with/without optimizations
 2. **Thunk call reduction**: Count how many calls skip thunks
 3. **Class realization reduction**: Count eliminated `[self self]` calls
@@ -2372,9 +2025,8 @@ ninja check-clang-codegen-objc
 | Phase 2: Stub Dispatch Helpers | 1 day | Phase 1 | ✅ Complete |
 | Phase 3: Thunk Generation | 2-3 days | Phases 1, 2 | ✅ Complete |
 | Phase 4: Call Site Logic | 1-2 days | Phases 1, 2, 3 | 🚧 In Progress |
-| Phase 5: Special Cases | 1 day | Phase 4 | ⏸️ Pending |
-| Phase 6: Tests | 1-2 days | All phases | ⏸️ Pending |
-| Phase 7: Optimize Dispatch | 1-2 days | All phases | ⏸️ Pending |
+| Phase 5: Special Cases and Tests | 1 day | Phase 4 | ⏸️ Pending |
+| Phase 6: Optimize Dispatch | 1-2 days | All phases | ⏸️ Pending |
 | **Total** | **1.5-2 weeks** | | ~60% Complete |
 
 ### Milestones

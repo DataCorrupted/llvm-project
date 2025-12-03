@@ -7,6 +7,12 @@ __attribute__((objc_root_class))
 - (Root *)method __attribute__((objc_direct));
 @end
 
+// EXPOSE-DIRECT-LABEL: define ptr @useMethod
+Root* useMethod(Root *root) {
+  // EXPOSE-DIRECT: call ptr @"-[Root method]_thunk"
+  return [root method];
+}
+
 @implementation Root
 // CHECK-LABEL: define internal ptr @"\01-[Root something]"(
 // EXPOSE-DIRECT-LABEL: define internal ptr @"\01-[Root something]"(ptr noundef
@@ -20,7 +26,11 @@ __attribute__((objc_root_class))
 - (id)method {
   return self;
 }
-// EXPOSE-DIRECT-LABEL: define linkonce_odr hidden ptr @"-[Root method]_thunk"(ptr
+
+@end
+
+// New thunk will be emitted after [Root method] instead of useMethod because its been updatd with method.
+// EXPOSE-DIRECT-LABEL: define linkonce_odr hidden ptr @"-[Root method]_thunk"
 // EXPOSE-DIRECT-LABEL: entry:
 // EXPOSE-DIRECT:           %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
 // EXPOSE-DIRECT:           br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
@@ -31,4 +41,3 @@ __attribute__((objc_root_class))
 // EXPOSE-DIRECT:           %[[RET:.*]] = musttail call ptr @"-[Root method]"
 // EXPOSE-DIRECT:           ret ptr %[[RET]]
 // EXPOSE-DIRECT-LABEL: dummy_ret_block:
-@end

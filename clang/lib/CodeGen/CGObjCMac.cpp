@@ -853,8 +853,8 @@ protected:
         *Implementation;   // The true implementation (where body is emitted)
     llvm::Function *Thunk; // The nil-check thunk (nullptr if not generated)
 
-    DirectMethodInfo(llvm::Function *Impl)
-        : Implementation(Impl), Thunk(nullptr) {}
+    DirectMethodInfo(llvm::Function *Impl, llvm::Function *Thunk = nullptr)
+        : Implementation(Impl), Thunk(Thunk) {}
   };
 
   /// DirectMethodDefinitions - map of direct methods which have been defined in
@@ -3958,10 +3958,13 @@ CGObjCCommonMac::GenerateDirectMethod(const ObjCMethodDecl *OMD,
     I->second.Implementation = Fn;
     llvm::Function *OldThunk = I->second.Thunk;
 
-    // CRITICAL: If implementation was replaced, and old thunk exists,
-    // invalidate the old thunk
-    if (OldFn && OldThunk) {
-      // Type mismatch occurred - regenerate thunk with correct type
+    // If implementation was replaced, and old thunk exists, invalidate the old
+    // thunk
+    //
+    // TODO: ideally, new thunk shouldn't be necessary, if the different return
+    // type are just subclasses, at IR level they are just pointers, i.e. the
+    // NewThunk and the OldThunk are identical.
+    if (OldThunk) {
       llvm::Function *NewThunk = GenerateObjCDirectThunk(OMD, CD, Fn);
 
       // Replace all uses before erasing
@@ -3979,16 +3982,8 @@ CGObjCCommonMac::GenerateDirectMethod(const ObjCMethodDecl *OMD,
     // ALWAYS use ExternalLinkage for true implementation
     Fn = llvm::Function::Create(MethodTy, llvm::GlobalValue::ExternalLinkage,
                                 Name, &CGM.getModule());
-    DirectMethodInfo Info(Fn);
-    DirectMethodDefinitions.insert(std::make_pair(COMD, Info));
+    DirectMethodDefinitions.insert(std::make_pair(COMD, DirectMethodInfo(Fn)));
     I = DirectMethodDefinitions.find(COMD);
-  }
-
-  // Generate thunk if optimization is enabled (only if not already created
-  // above)
-  if (CGM.shouldHaveNilCheckThunk(OMD) && !I->second.Thunk) {
-    llvm::Function *Thunk = GenerateObjCDirectThunk(OMD, CD, Fn);
-    I->second.Thunk = Thunk;
   }
 
   // Return reference to DirectMethodInfo (contains both Implementation and
@@ -4001,16 +3996,29 @@ CGObjCCommonMac::GenerateDirectMethod(const ObjCMethodDecl *OMD,
 /// The thunk must use musttail to remain transparent to ARC - any
 /// ARC operations must happen in the caller, not in the thunk.
 void CodeGenFunction::StartObjCDirectThunk(const ObjCMethodDecl *OMD,
-                                           llvm::Function *Fn,
-                                           const CGFunctionInfo &FnInfo,
-                                           const FunctionArgList &Args) {
+                                           llvm::Function *Fn, 
+                            const CGFunctionInfo &FI)
+                                          {
+  // Mark this as a thunk function to disable ARC parameter processing
+  // and other thunk-inappropriate behavior.
+  CurFuncIsThunk = true;
+
+  // Build argument list for StartFunction.
+  // We must include all parameters to match the thunk's LLVM function type.
+  // The thunk uses musttail to forward all arguments directly, so ARC
+  // processing in the prolog is harmless - the parameters are forwarded
+  // as-is without local copies.
+  FunctionArgList FunctionArgs;
+  FunctionArgs.push_back(OMD->getSelfDecl());
+  FunctionArgs.append(OMD->param_begin(), OMD->param_end());
+
   // The Start/Finish thunk pattern is borrowed from CGVTables.cpp
   // for C++ virtual method thunks, but adapted for ObjC direct methods.
   //
   // Like C++ thunks, we don't have an actual AST body for the thunk - we only
   // have the method's parameter declarations. Therefore, we pass empty
   // `GlobalDecl` to `StartFunction` ...
-  StartFunction(GlobalDecl(), OMD->getReturnType(), Fn, FnInfo, Args,
+  StartFunction(GlobalDecl(), OMD->getReturnType(), Fn, FI, FunctionArgs,
                 OMD->getLocation(), OMD->getLocation());
 
   // and manually set the decl afterwards so other utilities / helpers in CGF
@@ -4054,10 +4062,7 @@ CGObjCCommonMac::GenerateObjCDirectThunk(const ObjCMethodDecl *OMD,
          "Should only generate thunk when optimization enabled");
   assert(Implementation && "Implementation must exist");
 
-  // Get function type (same as implementation)
   llvm::FunctionType *ThunkTy = Implementation->getFunctionType();
-
-  // Generate thunk name: implementation symbol + "_thunk"
   std::string ThunkName = Implementation->getName().str() + "_thunk";
 
   // Create thunk with linkonce_odr linkage (allows deduplication)
@@ -4065,46 +4070,27 @@ CGObjCCommonMac::GenerateObjCDirectThunk(const ObjCMethodDecl *OMD,
       llvm::Function::Create(ThunkTy, llvm::GlobalValue::LinkOnceODRLinkage,
                              ThunkName, &CGM.getModule());
 
+  // Thunks should always have hidden visibility, other link units will have
+  // their own version of the (identical) thunk. If they make cross link-unit
+  // call, they are either calling through their thunk or directly dispatching
+  // to the true implementation, so making thunk visibile is meaningless.
   Thunk->setVisibility(llvm::GlobalValue::HiddenVisibility);
   Thunk->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
 
-  // CRITICAL: Copy function-level attributes from implementation
-  llvm::AttributeList ImplAttrs = Implementation->getAttributes();
-  Thunk->setAttributes(ImplAttrs);
-
-  // Build argument list for StartFunction
-  // For musttail thunks, we MUST NOT pass regular method parameters
-  // to StartFunction because that causes them to be stored in local variables
-  // with storeStrong, which adds ARC retains (but musttail won't release it!). 
-  // This breaks the thunk's ARC transparency!
-  //
-  // We only pass 'self' so we can perform the nil check on it.
-  // All other parameters will be forwarded directly from Thunk->args().
-  FunctionArgList FunctionArgs;
-  FunctionArgs.push_back(OMD->getSelfDecl());
-  // DO NOT append other parameters here - they would trigger storeStrong!
-
-  // Get CGFunctionInfo for this method
+  // Start the ObjC direct thunk (sets up state and calls StartFunction)
   const CGFunctionInfo &FI = CGM.getTypes().arrangeObjCMethodDeclaration(OMD);
 
   // Create a CodeGenFunction to generate the thunk body
   CodeGenFunction CGF(CGM);
+  CGF.StartObjCDirectThunk(OMD, Thunk, FI);
 
-  // Start the ObjC direct thunk (sets up state and calls StartFunction)
-  // After this call:
-  // - CGF.Builder is positioned in the entry block
-  // - 'self' parameter is accessible via CGF.GetAddrOfLocalVar(OMD->getSelfDecl())
-  // - Other parameters must be accessed directly from Thunk->args()
-  // - Return value storage is set up (if needed)
-  // - CurCodeDecl/CurFuncDecl are set to OMD
-  CGF.StartObjCDirectThunk(OMD, Thunk, FI, FunctionArgs);
+  // Copy function-level attributes from implementation to make musttail happy
+  llvm::AttributeList ImplAttrs = Implementation->getAttributes();
+  Thunk->setAttributes(ImplAttrs);
 
-  // Call precondition check which generates:
   // - [self self] for class methods (class realization)
   // - if (self == nil) branch to nil block with zero return
   // - continuation block for non-nil case
-  //
-  // After this call, Builder is in the continuation block (non-nil path)
   GenerateDirectMethodsPreconditionCheck(CGF, Thunk, OMD, CD);
 
   // Now emit the musttail call to the true implementation
@@ -4113,22 +4099,28 @@ CGObjCCommonMac::GenerateObjCDirectThunk(const ObjCMethodDecl *OMD,
   for (auto &Arg : Thunk->args())
     Args.push_back(&Arg);
 
-  // Create musttail call - MUST be immediately followed by return!
-  // The musttail attribute ensures that:
-  // 1. This call is a tail call (no stack frame)
-  // 2. The call appears as a direct control transfer to ARC optimizer
-  // 3. No ARC operations are inserted between thunk and implementation
+  // Create musttail call to the implementation
   llvm::CallInst *Call = CGF.Builder.CreateCall(Implementation, Args);
   Call->setTailCallKind(llvm::CallInst::TCK_MustTail);
-  Call->setCallingConv(Implementation->getCallingConv());
+
+  // Apply call-site attributes using ConstructAttributeList
+  // When sret is used, the call must have matching sret attributes on the first
+  // parameter for musttail to work correctly. This mirrors what C++ thunks do
+  // in EmitMustTailThunk.
+  unsigned CallingConv;
+  llvm::AttributeList Attrs;
+  CGM.ConstructAttributeList(Implementation->getName(), FI, GlobalDecl(OMD),
+                             Attrs, CallingConv, /*AttrOnCallSite=*/true,
+                             /*IsThunk=*/false);
+  Call->setAttributes(Attrs);
+  Call->setCallingConv(static_cast<llvm::CallingConv::ID>(CallingConv));
 
   // Immediately return the call result (musttail requirement)
   if (FI.getReturnInfo().isIndirect()) {
     // SRet case: return void
     CGF.Builder.CreateRetVoid();
   } else {
-    llvm::Type *RetTy = ThunkTy->getReturnType();
-    if (RetTy->isVoidTy())
+    if (ThunkTy->getReturnType()->isVoidTy())
       CGF.Builder.CreateRetVoid();
     else
       CGF.Builder.CreateRet(Call);
@@ -4157,6 +4149,13 @@ llvm::Function *CGObjCCommonMac::GetDirectMethodCallee(
     return Info.Implementation;
   }
 
+  // Thunk is lazily generated.
+  auto getOrCreateThunk = [&]() {
+    if (!Info.Thunk)
+      Info.Thunk = GenerateObjCDirectThunk(OMD, CD, Info.Implementation);
+    return Info.Thunk;
+  };
+
   assert(CGM.shouldHaveNilCheckThunk(OMD) &&
          "a method either has nil check thunk or have thunk inlined when "
          "exposing its symbol");
@@ -4164,16 +4163,16 @@ llvm::Function *CGObjCCommonMac::GetDirectMethodCallee(
   if (OMD->isInstanceMethod()) {
     // If we can prove instance methods receiver is not null, return the true
     // implementation
-    return ReceiverCanBeNull ? Info.Thunk : Info.Implementation;
-  } else if (OMD->isClassMethod()) {
+    return ReceiverCanBeNull ? getOrCreateThunk() : Info.Implementation;
+  }
+  if (OMD->isClassMethod()) {
     // For class methods, it need to be non-null and realized before we dispatch
     // to true implementation
     return (ReceiverCanBeNull || ClassObjectCanBeUnrealized)
-               ? Info.Thunk
+               ? getOrCreateThunk()
                : Info.Implementation;
-  } else {
-    llvm_unreachable("OMD should either be a class method or instance method");
   }
+  llvm_unreachable("OMD should either be a class method or instance method");
 }
 
 llvm::Value *

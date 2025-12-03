@@ -25,48 +25,15 @@ __attribute__((objc_root_class))
   return 42;
 }
 
-// CHECK-LABEL: define linkonce_odr hidden i32 @"-[Root intProperty2]_thunk"(ptr %self)
-// CHECK: entry:
-// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
-// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
-// CHECK: objc_direct_method.self_is_nil:
-// CHECK:   call void @llvm.memset
-// CHECK:   br label %dummy_ret_block
-// CHECK: objc_direct_method.cont:
-// CHECK:   %[[RET:.*]] = musttail call i32 @"-[Root intProperty2]"(ptr %self)
-// CHECK:   ret i32 %[[RET]]
-// CHECK: dummy_ret_block:
-
 // CHECK-LABEL: define hidden i32 @"-[Root getInt]"(ptr noundef %self)
 - (int)getInt __attribute__((objc_direct)) {
   return 42;
 }
 
-// CHECK-LABEL: define linkonce_odr hidden i32 @"-[Root getInt]_thunk"(ptr %self)
-// CHECK: entry:
-// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
-// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
-// CHECK: objc_direct_method.self_is_nil:
-// CHECK:   call void @llvm.memset
-// CHECK:   br label %dummy_ret_block
-// CHECK: objc_direct_method.cont:
-// CHECK:   %[[RET:.*]] = musttail call i32 @"-[Root getInt]"(ptr %self)
-// CHECK:   ret i32 %[[RET]]
-// CHECK: dummy_ret_block:
-
 // CHECK-LABEL: define hidden i32 @"+[Root classGetInt]"(ptr noundef %self)
 + (int)classGetInt __attribute__((objc_direct)) {
   return 42;
 }
-
-// CHECK-LABEL: define linkonce_odr hidden i32 @"+[Root classGetInt]_thunk"(ptr %self)
-// CHECK: entry:
-// CHECK:   %[[SELF:.*]] = load ptr, ptr %self.addr
-// CHECK:   %{{.*}} = load ptr, ptr @OBJC_SELECTOR_REFERENCES_{{.*}}
-// CHECK:   %[[CALL:.*]] = call ptr @objc_msgSend(ptr noundef %[[SELF]]
-// CHECK:   store ptr %[[CALL]], ptr %self.addr
-// CHECK:   %[[RET:.*]] = musttail call i32 @"+[Root classGetInt]"(ptr %self)
-// CHECK:   ret i32 %[[RET]]
 
 // CHECK-LABEL: define hidden i64 @"-[Root getComplex]"(ptr noundef %self)
 - (struct my_complex_struct)getComplex __attribute__((objc_direct)) {
@@ -74,32 +41,11 @@ __attribute__((objc_root_class))
   return st;
 }
 
-// CHECK-LABEL: define linkonce_odr hidden i64 @"-[Root getComplex]_thunk"(ptr %self)
-// CHECK: entry:
-// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
-// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
-// CHECK: objc_direct_method.self_is_nil:
-// CHECK:   call void @llvm.memset
-// CHECK:   br label %dummy_ret_block
-// CHECK: objc_direct_method.cont:
-// CHECK:   %[[RET:.*]] = musttail call i64 @"-[Root getComplex]"(ptr %self)
-// CHECK:   ret i64 %[[RET]]
-// CHECK: dummy_ret_block:
-
 // CHECK-LABEL: define hidden i64 @"+[Root classGetComplex]"(ptr noundef %self)
 + (struct my_complex_struct)classGetComplex __attribute__((objc_direct)) {
   struct my_complex_struct st = {.a = 42};
   return st;
 }
-
-// CHECK-LABEL: define linkonce_odr hidden i64 @"+[Root classGetComplex]_thunk"(ptr %self)
-// CHECK: entry:
-// CHECK:   %[[SELF:.*]] = load ptr, ptr %self.addr
-// CHECK:   %{{.*}} = load ptr, ptr @OBJC_SELECTOR_REFERENCES_{{.*}}
-// CHECK:   %[[CALL:.*]] = call ptr @objc_msgSend(ptr noundef %[[SELF]]
-// CHECK:   store ptr %[[CALL]], ptr %self.addr
-// CHECK:   %[[RET:.*]] = musttail call i64 @"+[Root classGetComplex]"(ptr %self)
-// CHECK:   ret i64 %[[RET]]
 
 // CHECK-LABEL: define hidden void @"-[Root getAggregate]"(ptr {{.*}} sret(%struct.my_aggregate_struct) {{.*}} %agg.result, ptr noundef %self)
 - (struct my_aggregate_struct)getAggregate __attribute__((objc_direct)) {
@@ -107,33 +53,11 @@ __attribute__((objc_root_class))
   return st;
 }
 
-// CHECK-LABEL: define linkonce_odr hidden void @"-[Root getAggregate]_thunk"(ptr {{.*}} %agg.result, ptr %self)
-// CHECK: entry:
-// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
-// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
-// CHECK: objc_direct_method.self_is_nil:
-// CHECK:   call void @llvm.memset
-// CHECK:   br label %dummy_ret_block
-// CHECK: objc_direct_method.cont:
-// CHECK:   musttail call void @"-[Root getAggregate]"(ptr %agg.result, ptr %self)
-// CHECK:   ret void
-// CHECK: dummy_ret_block:
-// CHECK:   ret void
-
 // CHECK-LABEL: define hidden void @"+[Root classGetAggregate]"(ptr {{.*}} sret(%struct.my_aggregate_struct) {{.*}} %agg.result, ptr noundef %self)
 + (struct my_aggregate_struct)classGetAggregate __attribute__((objc_direct)) {
   struct my_aggregate_struct st = {.a = 42};
   return st;
 }
-
-// CHECK-LABEL: define linkonce_odr hidden void @"+[Root classGetAggregate]_thunk"(ptr {{.*}} %agg.result, ptr %self)
-// CHECK: entry:
-// CHECK:   %[[SELF:.*]] = load ptr, ptr %self.addr
-// CHECK:   %{{.*}} = load ptr, ptr @OBJC_SELECTOR_REFERENCES_{{.*}}
-// CHECK:   %[[CALL:.*]] = call ptr @objc_msgSend(ptr noundef %[[SELF]]
-// CHECK:   store ptr %[[CALL]], ptr %self.addr
-// CHECK:   musttail call void @"+[Root classGetAggregate]"(ptr %agg.result, ptr %self)
-// CHECK:   ret void
 
 // CHECK-LABEL: define hidden void @"-[Root accessCmd]"(ptr noundef %self)
 - (void)accessCmd __attribute__((objc_direct)) {
@@ -141,47 +65,10 @@ __attribute__((objc_root_class))
   SEL sel = _cmd;
 }
 
-// CHECK-LABEL: define linkonce_odr hidden void @"-[Root accessCmd]_thunk"(ptr %self)
-// CHECK: entry:
-// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
-// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
-// CHECK: objc_direct_method.self_is_nil:
-// CHECK:   br label %dummy_ret_block
-// CHECK: objc_direct_method.cont:
-// CHECK:   musttail call void @"-[Root accessCmd]"(ptr %self)
-// CHECK:   ret void
-// CHECK: dummy_ret_block:
-// CHECK:   ret void
-
 @end
 
 // CHECK-LABEL: define hidden i32 @"-[Root intProperty]"(ptr noundef %self)
-
-// CHECK-LABEL: define linkonce_odr hidden i32 @"-[Root intProperty]_thunk"(ptr %self)
-// CHECK: entry:
-// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
-// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
-// CHECK: objc_direct_method.self_is_nil:
-// CHECK:   call void @llvm.memset
-// CHECK:   br label %dummy_ret_block
-// CHECK: objc_direct_method.cont:
-// CHECK:   %[[RET:.*]] = musttail call i32 @"-[Root intProperty]"(ptr %self)
-// CHECK:   ret i32 %[[RET]]
-// CHECK: dummy_ret_block:
-
 // CHECK-LABEL: define hidden ptr @"-[Root objectProperty]"(ptr noundef %self)
-
-// CHECK-LABEL: define linkonce_odr hidden ptr @"-[Root objectProperty]_thunk"(ptr %self)
-// CHECK: entry:
-// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
-// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
-// CHECK: objc_direct_method.self_is_nil:
-// CHECK:   call void @llvm.memset
-// CHECK:   br label %dummy_ret_block
-// CHECK: objc_direct_method.cont:
-// CHECK:   %[[RET:.*]] = musttail call ptr @"-[Root objectProperty]"(ptr %self)
-// CHECK:   ret ptr %[[RET]]
-// CHECK: dummy_ret_block:
 
 @interface Foo : Root {
   id __strong _cause_cxx_destruct;
@@ -207,48 +94,10 @@ __attribute__((objc_direct_members))
   return 42;
 }
 
-// CHECK-LABEL: define linkonce_odr hidden i32 @"-[Foo directMethodInExtension]_thunk"(ptr %self)
-// CHECK: entry:
-// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
-// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
-// CHECK: objc_direct_method.self_is_nil:
-// CHECK:   call void @llvm.memset
-// CHECK:   br label %dummy_ret_block
-// CHECK: objc_direct_method.cont:
-// CHECK:   %[[RET:.*]] = musttail call i32 @"-[Foo directMethodInExtension]"(ptr %self)
-// CHECK:   ret i32 %[[RET]]
-// CHECK: dummy_ret_block:
-
 // CHECK-LABEL: define hidden i32 @"-[Foo getDirect_setDynamic]"(ptr noundef %self)
-
-// CHECK-LABEL: define linkonce_odr hidden i32 @"-[Foo getDirect_setDynamic]_thunk"(ptr %self)
-// CHECK: entry:
-// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
-// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
-// CHECK: objc_direct_method.self_is_nil:
-// CHECK:   call void @llvm.memset
-// CHECK:   br label %dummy_ret_block
-// CHECK: objc_direct_method.cont:
-// CHECK:   %[[RET:.*]] = musttail call i32 @"-[Foo getDirect_setDynamic]"(ptr %self)
-// CHECK:   ret i32 %[[RET]]
-// CHECK: dummy_ret_block:
-
 // CHECK-LABEL: define internal void @"\01-[Foo setGetDirect_setDynamic:]"(ptr noundef %self, ptr noundef %_cmd, i32 noundef %getDirect_setDynamic)
 // CHECK-LABEL: define internal i32 @"\01-[Foo getDynamic_setDirect]"(ptr noundef %self, ptr noundef %_cmd)
-
 // CHECK-LABEL: define hidden void @"-[Foo setGetDynamic_setDirect:]"(ptr noundef %self, i32 noundef %getDynamic_setDirect)
-
-// CHECK-LABEL: define linkonce_odr hidden void @"-[Foo setGetDynamic_setDirect:]_thunk"(ptr %self, i32 %0)
-// CHECK: entry:
-// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
-// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
-// CHECK: objc_direct_method.self_is_nil:
-// CHECK:   br label %dummy_ret_block
-// CHECK: objc_direct_method.cont:
-// CHECK:   musttail call void @"-[Foo setGetDynamic_setDirect:]"(ptr %self, i32 %0)
-// CHECK:   ret void
-// CHECK: dummy_ret_block:
-// CHECK:   ret void
 
 @end
 
@@ -258,34 +107,10 @@ __attribute__((objc_direct_members))
   return 42;
 }
 
-// CHECK-LABEL: define linkonce_odr hidden i32 @"-[Foo directMethodInCategory]_thunk"(ptr %self)
-// CHECK: entry:
-// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
-// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
-// CHECK: objc_direct_method.self_is_nil:
-// CHECK:   call void @llvm.memset
-// CHECK:   br label %dummy_ret_block
-// CHECK: objc_direct_method.cont:
-// CHECK:   %[[RET:.*]] = musttail call i32 @"-[Foo directMethodInCategory]"(ptr %self)
-// CHECK:   ret i32 %[[RET]]
-// CHECK: dummy_ret_block:
-
 // CHECK-LABEL: define hidden i32 @"-[Foo directMethodInCategoryNoDecl]"(ptr noundef %self)
 - (int)directMethodInCategoryNoDecl __attribute__((objc_direct)) {
   return 42;
 }
-
-// CHECK-LABEL: define linkonce_odr hidden i32 @"-[Foo directMethodInCategoryNoDecl]_thunk"(ptr %self)
-// CHECK: entry:
-// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
-// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
-// CHECK: objc_direct_method.self_is_nil:
-// CHECK:   call void @llvm.memset
-// CHECK:   br label %dummy_ret_block
-// CHECK: objc_direct_method.cont:
-// CHECK:   %[[RET:.*]] = musttail call i32 @"-[Foo directMethodInCategoryNoDecl]"(ptr %self)
-// CHECK:   ret i32 %[[RET]]
-// CHECK: dummy_ret_block:
 
 @end
 
@@ -296,6 +121,43 @@ int useRoot(Root *r) {
   // CHECK: call i32 @"-[Root intProperty2]_thunk"(ptr noundef %{{[0-9]+}})
   return [r getInt] + [r intProperty] + [r intProperty2];
 }
+
+// Thunks are emitted after the first function that uses them
+// CHECK-LABEL: define linkonce_odr hidden i32 @"-[Root getInt]_thunk"(ptr noundef %self)
+// CHECK: entry:
+// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
+// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
+// CHECK: objc_direct_method.self_is_nil:
+// CHECK:   call void @llvm.memset
+// CHECK:   br label %dummy_ret_block
+// CHECK: objc_direct_method.cont:
+// CHECK:   %[[RET:.*]] = musttail call i32 @"-[Root getInt]"(ptr noundef %self)
+// CHECK:   ret i32 %[[RET]]
+// CHECK: dummy_ret_block:
+
+// CHECK-LABEL: define linkonce_odr hidden i32 @"-[Root intProperty]_thunk"(ptr noundef %self)
+// CHECK: entry:
+// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
+// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
+// CHECK: objc_direct_method.self_is_nil:
+// CHECK:   call void @llvm.memset
+// CHECK:   br label %dummy_ret_block
+// CHECK: objc_direct_method.cont:
+// CHECK:   %[[RET:.*]] = musttail call i32 @"-[Root intProperty]"(ptr noundef %self)
+// CHECK:   ret i32 %[[RET]]
+// CHECK: dummy_ret_block:
+
+// CHECK-LABEL: define linkonce_odr hidden i32 @"-[Root intProperty2]_thunk"(ptr noundef %self)
+// CHECK: entry:
+// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
+// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
+// CHECK: objc_direct_method.self_is_nil:
+// CHECK:   call void @llvm.memset
+// CHECK:   br label %dummy_ret_block
+// CHECK: objc_direct_method.cont:
+// CHECK:   %[[RET:.*]] = musttail call i32 @"-[Root intProperty2]"(ptr noundef %self)
+// CHECK:   ret i32 %[[RET]]
+// CHECK: dummy_ret_block:
 
 // CHECK-LABEL: define{{.*}} i32 @useFoo(ptr noundef %f)
 int useFoo(Foo *f) {
@@ -310,6 +172,66 @@ int useFoo(Foo *f) {
          [f directMethodInCategory] +
          [f directMethodInCategoryNoDecl];
 }
+
+// CHECK-LABEL: define linkonce_odr hidden void @"-[Foo setGetDynamic_setDirect:]_thunk"(ptr noundef %self, i32 noundef
+// CHECK: entry:
+// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
+// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
+// CHECK: objc_direct_method.self_is_nil:
+// CHECK:   br label %dummy_ret_block
+// CHECK: objc_direct_method.cont:
+// CHECK:   musttail call void @"-[Foo setGetDynamic_setDirect:]"(ptr noundef %self, i32 noundef
+// CHECK:   ret void
+// CHECK: dummy_ret_block:
+// CHECK:   ret void
+
+// CHECK-LABEL: define linkonce_odr hidden i32 @"-[Foo getDirect_setDynamic]_thunk"(ptr noundef %self)
+// CHECK: entry:
+// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
+// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
+// CHECK: objc_direct_method.self_is_nil:
+// CHECK:   call void @llvm.memset
+// CHECK:   br label %dummy_ret_block
+// CHECK: objc_direct_method.cont:
+// CHECK:   %[[RET:.*]] = musttail call i32 @"-[Foo getDirect_setDynamic]"(ptr noundef %self)
+// CHECK:   ret i32 %[[RET]]
+// CHECK: dummy_ret_block:
+
+// CHECK-LABEL: define linkonce_odr hidden i32 @"-[Foo directMethodInExtension]_thunk"(ptr noundef %self)
+// CHECK: entry:
+// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
+// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
+// CHECK: objc_direct_method.self_is_nil:
+// CHECK:   call void @llvm.memset
+// CHECK:   br label %dummy_ret_block
+// CHECK: objc_direct_method.cont:
+// CHECK:   %[[RET:.*]] = musttail call i32 @"-[Foo directMethodInExtension]"(ptr noundef %self)
+// CHECK:   ret i32 %[[RET]]
+// CHECK: dummy_ret_block:
+
+// CHECK-LABEL: define linkonce_odr hidden i32 @"-[Foo directMethodInCategory]_thunk"(ptr noundef %self)
+// CHECK: entry:
+// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
+// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
+// CHECK: objc_direct_method.self_is_nil:
+// CHECK:   call void @llvm.memset
+// CHECK:   br label %dummy_ret_block
+// CHECK: objc_direct_method.cont:
+// CHECK:   %[[RET:.*]] = musttail call i32 @"-[Foo directMethodInCategory]"(ptr noundef %self)
+// CHECK:   ret i32 %[[RET]]
+// CHECK: dummy_ret_block:
+
+// CHECK-LABEL: define linkonce_odr hidden i32 @"-[Foo directMethodInCategoryNoDecl]_thunk"(ptr noundef %self)
+// CHECK: entry:
+// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
+// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
+// CHECK: objc_direct_method.self_is_nil:
+// CHECK:   call void @llvm.memset
+// CHECK:   br label %dummy_ret_block
+// CHECK: objc_direct_method.cont:
+// CHECK:   %[[RET:.*]] = musttail call i32 @"-[Foo directMethodInCategoryNoDecl]"(ptr noundef %self)
+// CHECK:   ret i32 %[[RET]]
+// CHECK: dummy_ret_block:
 
 __attribute__((objc_root_class))
 @interface RootDeclOnly
@@ -332,6 +254,42 @@ int useRootDeclOnly(RootDeclOnly *r) {
 // CHECK:   call void @llvm.memset
 // CHECK:   br label %dummy_ret_block
 // CHECK: objc_direct_method.cont:
-// CHECK:   %[[RET:.*]] = musttail call i32 @"-[RootDeclOnly intProperty]"(ptr %self)
+// CHECK:   %[[RET:.*]] = musttail call i32 @"-[RootDeclOnly intProperty]"(ptr noundef %self)
 // CHECK:   ret i32 %[[RET]]
 // CHECK: dummy_ret_block:
+
+int useSRet(Root *r) {
+  // CHECK: call i64 @"-[Root getComplex]_thunk"
+  // CHECK: call i64 @"+[Root classGetComplex]_thunk"
+  // CHECK: call void @"-[Root getAggregate]_thunk"
+  // CHECK: call void @"+[Root classGetAggregate]_thunk"
+  return [r getComplex].a +
+        [Root classGetComplex].a +
+        [r getAggregate].a +
+        [Root classGetAggregate].a;
+}
+
+// CHECK-LABEL: define linkonce_odr hidden i64 @"-[Root getComplex]_thunk"
+// CHECK-LABEL: define linkonce_odr hidden i64 @"+[Root classGetComplex]_thunk"
+
+// CHECK-LABEL: define linkonce_odr hidden void @"-[Root getAggregate]_thunk"(ptr dead_on_unwind noalias writable sret(%struct.my_aggregate_struct) {{.*}} %agg.result, ptr noundef %self)
+// CHECK: entry:
+// CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
+// CHECK:   br i1 %[[IS_NIL]], label %objc_direct_method.self_is_nil, label %objc_direct_method.cont
+// CHECK: objc_direct_method.self_is_nil:
+// CHECK:   call void @llvm.memset
+// CHECK:   br label %dummy_ret_block
+// CHECK: objc_direct_method.cont:
+// CHECK:   musttail call void @"-[Root getAggregate]"(ptr dead_on_unwind writable sret(%struct.my_aggregate_struct) {{.*}} %agg.result, ptr noundef %self)
+// CHECK:   ret void
+// CHECK: dummy_ret_block:
+// CHECK:   ret void
+
+// CHECK-LABEL: define linkonce_odr hidden void @"+[Root classGetAggregate]_thunk"(ptr dead_on_unwind noalias writable sret(%struct.my_aggregate_struct) {{.*}} %agg.result, ptr noundef %self)
+// CHECK: entry:
+// CHECK:   {{.*}} = load ptr, ptr @OBJC_SELECTOR_REFERENCES_
+// CHECK:   {{.*}} = call ptr @objc_msgSend
+// CHECK:   musttail call void @"+[Root classGetAggregate]"(ptr dead_on_unwind writable sret(%struct.my_aggregate_struct) {{.*}} %agg.result, ptr noundef %self)
+// CHECK:   ret void
+// CHECK: dummy_ret_block:                                  ; No predecessors!
+// CHECK:   ret void

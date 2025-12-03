@@ -2424,8 +2424,7 @@ public:
 
   /// Start an Objective-C direct method thunk.
   void StartObjCDirectThunk(const ObjCMethodDecl *OMD, llvm::Function *Fn,
-                            const CGFunctionInfo &FnInfo,
-                            const FunctionArgList &Args);
+                            const CGFunctionInfo &FI);
 
   /// Finish an Objective-C direct method thunk.
   void FinishObjCDirectThunk();
