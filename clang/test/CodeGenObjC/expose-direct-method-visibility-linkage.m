@@ -50,7 +50,6 @@
 // RUN: llvm-nm %t/main | FileCheck %s --check-prefix=EXE
 
 // Thunks should be defined locally
-// EXE-DAG: {{[0-9a-f]+}} t _+[Foo exportedClassMethod:]_thunk
 // EXE-DAG: {{[0-9a-f]+}} t _-[Foo exportedInstanceMethod:]_thunk
 // EXE-DAG: {{[0-9a-f]+}} t _-[Foo exportedValue]_thunk
 // EXE-DAG: {{[0-9a-f]+}} t _-[Foo setExportedValue:]_thunk
@@ -129,10 +128,6 @@
 
 // FOO_M-LABEL: define dso_local i32 @"+[Foo exportedClassMethod:]"
 + (int)exportedClassMethod:(int)x {
-    // Compiler is not smart enough to know that the class is realized yet,
-    // so we dispatch to the thunk
-    // FOO_M: call i32 @"+[Foo classMethod:]_thunk"
-  [Foo classMethod:x];
   return x * 5;
 }
 
@@ -163,7 +158,7 @@ int main() {
     // MAIN_M: call i32 @"-[Foo exportedInstanceMethod:]_thunk"
     printf("Exported instance: %d\n", [obj exportedInstanceMethod:10]);
 
-    // MAIN_M: call i32 @"+[Foo exportedClassMethod:]_thunk"
+    // MAIN_M: call i32 @"+[Foo exportedClassMethod:]"
     printf("Exported class: %d\n", [Foo exportedClassMethod:10]);
 }
     return 0;
@@ -173,4 +168,3 @@ int main() {
 // MAIN_M-LABEL: define linkonce_odr hidden void @"-[Foo setExportedValue:]_thunk"
 // MAIN_M-LABEL: define linkonce_odr hidden i32 @"-[Foo exportedValue]_thunk"
 // MAIN_M-LABEL: define linkonce_odr hidden i32 @"-[Foo exportedInstanceMethod:]_thunk"
-// MAIN_M-LABEL: define linkonce_odr hidden i32 @"+[Foo exportedClassMethod:]_thunk"
