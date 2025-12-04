@@ -259,19 +259,23 @@ int useRootDeclOnly(RootDeclOnly *r) {
 // CHECK: dummy_ret_block:
 
 int useSRet(Root *r) {
-  // CHECK: call i64 @"-[Root getComplex]_thunk"
-  // CHECK: call i64 @"+[Root classGetComplex]_thunk"
-  // CHECK: call void @"-[Root getAggregate]_thunk"
-  // CHECK: call void @"+[Root classGetAggregate]_thunk"
-  return [r getComplex].a +
-        [Root classGetComplex].a +
-        [r getAggregate].a +
-        [Root classGetAggregate].a;
+  return (
+    // First call is to instance method - uses thunk
+    // CHECK: call i64 @"-[Root getComplex]_thunk"
+    [r getComplex].a +
+    // TODO: we should know that this instance is non nil.
+    // CHECK: call void @"-[Root getAggregate]_thunk"
+    [r getAggregate].a +
+    // After the instance method call, Root class is realized
+    // So subsequent class method calls can skip the thunk and call directly
+    // CHECK: call i64 @"+[Root classGetComplex]"(ptr noundef
+    [Root classGetComplex].a +
+    // CHECK: call void @"+[Root classGetAggregate]"(ptr {{.*}}sret
+    [Root classGetAggregate].a
+  );
 }
 
 // CHECK-LABEL: define linkonce_odr hidden i64 @"-[Root getComplex]_thunk"
-// CHECK-LABEL: define linkonce_odr hidden i64 @"+[Root classGetComplex]_thunk"
-
 // CHECK-LABEL: define linkonce_odr hidden void @"-[Root getAggregate]_thunk"(ptr dead_on_unwind noalias writable sret(%struct.my_aggregate_struct) {{.*}} %agg.result, ptr noundef %self)
 // CHECK: entry:
 // CHECK:   %[[IS_NIL:.*]] = icmp eq ptr {{.*}}, null
@@ -285,11 +289,7 @@ int useSRet(Root *r) {
 // CHECK: dummy_ret_block:
 // CHECK:   ret void
 
-// CHECK-LABEL: define linkonce_odr hidden void @"+[Root classGetAggregate]_thunk"(ptr dead_on_unwind noalias writable sret(%struct.my_aggregate_struct) {{.*}} %agg.result, ptr noundef %self)
-// CHECK: entry:
-// CHECK:   {{.*}} = load ptr, ptr @OBJC_SELECTOR_REFERENCES_
-// CHECK:   {{.*}} = call ptr @objc_msgSend
-// CHECK:   musttail call void @"+[Root classGetAggregate]"(ptr dead_on_unwind writable sret(%struct.my_aggregate_struct) {{.*}} %agg.result, ptr noundef %self)
-// CHECK:   ret void
-// CHECK: dummy_ret_block:                                  ; No predecessors!
-// CHECK:   ret void
+// The class method thunk is NOT generated because useSRet calls instance methods first,
+// which realizes the class, so class methods can be called directly.
+// CHECK-NOT: define {{.*}} @"+[Root classGetComplex]_thunk"
+// CHECK-NOT: define {{.*}} @"+[Root classGetAggregate]_thunk"
