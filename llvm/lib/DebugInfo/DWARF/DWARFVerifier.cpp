@@ -80,14 +80,39 @@ DWARFVerifier::DieRangeInfo::insert(const DieRangeInfo &RI) {
   if (RI.Ranges.empty())
     return Children.end();
 
-  auto End = Children.end();
-  auto Iter = Children.begin();
-  while (Iter != End) {
-    if (Iter->intersects(RI))
-      return Iter;
-    ++Iter;
+  auto [It, Inserted] = Children.insert(RI);
+  if (!Inserted)
+    return Children.end(); // Exact duplicate, allowed.
+
+  // Check only the immediate neighbors for intersection. Since children are
+  // verified to be non-overlapping as they are inserted, only adjacent entries
+  // in the sorted set can intersect with a newly inserted entry.
+  //
+  // Proof: all existing children are pairwise non-overlapping (checked on each
+  // prior insertion). For single-range children sorted by LowPC, if child
+  // C < P < RI in sorted order and C, P are non-overlapping, then
+  // C.HighPC <= P.LowPC. If P also doesn't intersect RI (P.HighPC <= RI.LowPC),
+  // then C.HighPC <= P.LowPC <= RI.LowPC, so C can't intersect RI either.
+  // The same argument applies symmetrically in the successor direction.
+
+  // Check immediate predecessor.
+  if (It != Children.begin()) {
+    auto Prev = std::prev(It);
+    if (Prev->intersects(RI)) {
+      Children.erase(It);
+      return Prev;
+    }
   }
-  Children.insert(RI);
+
+  // Check immediate successor.
+  auto Next = std::next(It);
+  if (Next != Children.end()) {
+    if (Next->intersects(RI)) {
+      Children.erase(It);
+      return Next;
+    }
+  }
+
   return Children.end();
 }
 
