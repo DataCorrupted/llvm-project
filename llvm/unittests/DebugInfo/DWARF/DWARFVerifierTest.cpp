@@ -150,9 +150,8 @@ TEST(DWARFVerifierTest, InsertPerformanceForwardOrder) {
   EXPECT_EQ(Parent.Children.size(), (size_t)N);
   // Should complete well within 10 seconds. The old O(N^2) implementation
   // would take minutes for N=100000.
-  EXPECT_LT(ElapsedMs, 10000)
-      << "Insert took " << ElapsedMs
-      << "ms; likely O(N^2) regression for N=" << N;
+  EXPECT_LT(ElapsedMs, 10000) << "Insert took " << ElapsedMs
+                              << "ms; likely O(N^2) regression for N=" << N;
 }
 
 TEST(DWARFVerifierTest, InsertPerformanceReverseOrder) {
@@ -172,9 +171,8 @@ TEST(DWARFVerifierTest, InsertPerformanceReverseOrder) {
           .count();
 
   EXPECT_EQ(Parent.Children.size(), (size_t)N);
-  EXPECT_LT(ElapsedMs, 10000)
-      << "Insert took " << ElapsedMs
-      << "ms; likely O(N^2) regression for N=" << N;
+  EXPECT_LT(ElapsedMs, 10000) << "Insert took " << ElapsedMs
+                              << "ms; likely O(N^2) regression for N=" << N;
 }
 
 TEST(DWARFVerifierTest, InsertPerformanceRandomOrder) {
@@ -200,9 +198,8 @@ TEST(DWARFVerifierTest, InsertPerformanceRandomOrder) {
           .count();
 
   EXPECT_EQ(Parent.Children.size(), (size_t)N);
-  EXPECT_LT(ElapsedMs, 10000)
-      << "Insert took " << ElapsedMs
-      << "ms; likely O(N^2) regression for N=" << N;
+  EXPECT_LT(ElapsedMs, 10000) << "Insert took " << ElapsedMs
+                              << "ms; likely O(N^2) regression for N=" << N;
 }
 
 TEST(DWARFVerifierTest, InsertPerformanceWithOverlapDetection) {
@@ -227,8 +224,8 @@ TEST(DWARFVerifierTest, InsertPerformanceWithOverlapDetection) {
           .count();
 
   EXPECT_NE(It, Parent.Children.end()) << "Overlap should be detected";
-  EXPECT_LT(ElapsedMs, 100)
-      << "Single overlap detection took " << ElapsedMs << "ms; should be O(log N)";
+  EXPECT_LT(ElapsedMs, 100) << "Single overlap detection took " << ElapsedMs
+                            << "ms; should be O(log N)";
 }
 
 } // namespace
