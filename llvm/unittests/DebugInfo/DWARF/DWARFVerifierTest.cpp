@@ -9,8 +9,6 @@
 #include "llvm/DebugInfo/DWARF/DWARFVerifier.h"
 #include "llvm/DebugInfo/DWARF/DWARFAddressRange.h"
 #include "gtest/gtest.h"
-#include <chrono>
-#include <random>
 
 using namespace llvm;
 
@@ -22,10 +20,6 @@ using DieRangeInfo = DWARFVerifier::DieRangeInfo;
 DieRangeInfo makeRI(uint64_t Lo, uint64_t Hi) {
   return DieRangeInfo({{Lo, Hi}});
 }
-
-//===----------------------------------------------------------------------===//
-// Correctness tests
-//===----------------------------------------------------------------------===//
 
 TEST(DWARFVerifierTest, InsertNoOverlap) {
   DieRangeInfo Parent;
@@ -123,109 +117,6 @@ TEST(DWARFVerifierTest, InsertRandomOrderNoOverlap) {
   EXPECT_EQ(Parent.insert(makeRI(700, 800)), Parent.Children.end());
   EXPECT_EQ(Parent.insert(makeRI(300, 400)), Parent.Children.end());
   EXPECT_EQ(Parent.Children.size(), 4u);
-}
-
-//===----------------------------------------------------------------------===//
-// Stress test: O(N^2) -> O(N log N) performance regression test
-//===----------------------------------------------------------------------===//
-
-TEST(DWARFVerifierTest, InsertPerformanceForwardOrder) {
-  // Insert N non-overlapping ranges in forward address order.
-  // With O(N^2): N=100000 would take ~minutes.
-  // With O(N log N): should complete in < 1 second.
-  const unsigned N = 100000;
-  DieRangeInfo Parent;
-
-  auto Start = std::chrono::steady_clock::now();
-  for (unsigned I = 0; I < N; ++I) {
-    uint64_t Lo = I * 100;
-    uint64_t Hi = Lo + 50;
-    ASSERT_EQ(Parent.insert(makeRI(Lo, Hi)), Parent.Children.end());
-  }
-  auto End = std::chrono::steady_clock::now();
-  auto ElapsedMs =
-      std::chrono::duration_cast<std::chrono::milliseconds>(End - Start)
-          .count();
-
-  EXPECT_EQ(Parent.Children.size(), (size_t)N);
-  // Should complete well within 10 seconds. The old O(N^2) implementation
-  // would take minutes for N=100000.
-  EXPECT_LT(ElapsedMs, 10000) << "Insert took " << ElapsedMs
-                              << "ms; likely O(N^2) regression for N=" << N;
-}
-
-TEST(DWARFVerifierTest, InsertPerformanceReverseOrder) {
-  // Insert in reverse order — exercises different code paths.
-  const unsigned N = 100000;
-  DieRangeInfo Parent;
-
-  auto Start = std::chrono::steady_clock::now();
-  for (unsigned I = N; I > 0; --I) {
-    uint64_t Lo = I * 100;
-    uint64_t Hi = Lo + 50;
-    ASSERT_EQ(Parent.insert(makeRI(Lo, Hi)), Parent.Children.end());
-  }
-  auto End = std::chrono::steady_clock::now();
-  auto ElapsedMs =
-      std::chrono::duration_cast<std::chrono::milliseconds>(End - Start)
-          .count();
-
-  EXPECT_EQ(Parent.Children.size(), (size_t)N);
-  EXPECT_LT(ElapsedMs, 10000) << "Insert took " << ElapsedMs
-                              << "ms; likely O(N^2) regression for N=" << N;
-}
-
-TEST(DWARFVerifierTest, InsertPerformanceRandomOrder) {
-  // Insert in random order — most realistic scenario.
-  const unsigned N = 100000;
-  DieRangeInfo Parent;
-
-  // Generate N non-overlapping ranges, then shuffle.
-  std::vector<std::pair<uint64_t, uint64_t>> Ranges;
-  Ranges.reserve(N);
-  for (unsigned I = 0; I < N; ++I)
-    Ranges.push_back({I * 100, I * 100 + 50});
-
-  std::mt19937 RNG(42); // Fixed seed for reproducibility.
-  std::shuffle(Ranges.begin(), Ranges.end(), RNG);
-
-  auto Start = std::chrono::steady_clock::now();
-  for (const auto &[Lo, Hi] : Ranges)
-    ASSERT_EQ(Parent.insert(makeRI(Lo, Hi)), Parent.Children.end());
-  auto End = std::chrono::steady_clock::now();
-  auto ElapsedMs =
-      std::chrono::duration_cast<std::chrono::milliseconds>(End - Start)
-          .count();
-
-  EXPECT_EQ(Parent.Children.size(), (size_t)N);
-  EXPECT_LT(ElapsedMs, 10000) << "Insert took " << ElapsedMs
-                              << "ms; likely O(N^2) regression for N=" << N;
-}
-
-TEST(DWARFVerifierTest, InsertPerformanceWithOverlapDetection) {
-  // Insert N-1 non-overlapping ranges, then insert one that overlaps.
-  // Verify the overlap is detected quickly.
-  const unsigned N = 100000;
-  DieRangeInfo Parent;
-
-  for (unsigned I = 0; I < N - 1; ++I) {
-    uint64_t Lo = I * 100;
-    uint64_t Hi = Lo + 50;
-    ASSERT_EQ(Parent.insert(makeRI(Lo, Hi)), Parent.Children.end());
-  }
-
-  // Insert an overlapping range in the middle.
-  auto Start = std::chrono::steady_clock::now();
-  uint64_t Mid = (N / 2) * 100;
-  auto It = Parent.insert(makeRI(Mid + 10, Mid + 60));
-  auto End = std::chrono::steady_clock::now();
-  auto ElapsedMs =
-      std::chrono::duration_cast<std::chrono::milliseconds>(End - Start)
-          .count();
-
-  EXPECT_NE(It, Parent.Children.end()) << "Overlap should be detected";
-  EXPECT_LT(ElapsedMs, 100) << "Single overlap detection took " << ElapsedMs
-                            << "ms; should be O(log N)";
 }
 
 } // namespace

@@ -87,6 +87,7 @@ DWARFVerifier::DieRangeInfo::insert(const DieRangeInfo &RI) {
   // Check only the immediate neighbors for intersection. Since children are
   // verified to be non-overlapping as they are inserted, only adjacent entries
   // in the sorted set can intersect with a newly inserted entry.
+
   // Check immediate predecessor.
   if (It != Children.begin()) {
     auto Prev = std::prev(It);
