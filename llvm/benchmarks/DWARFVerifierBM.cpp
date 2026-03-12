@@ -32,10 +32,7 @@ static void BM_DieRangeInfoInsertForward(benchmark::State &State) {
     benchmark::DoNotOptimize(Parent);
   }
 }
-BENCHMARK(BM_DieRangeInfoInsertForward)
-    ->Arg(1000)
-    ->Arg(10000)
-    ->Arg(100000);
+BENCHMARK(BM_DieRangeInfoInsertForward)->Arg(1000)->Arg(10000)->Arg(100000);
 
 // Insert N non-overlapping ranges in reverse address order.
 static void BM_DieRangeInfoInsertReverse(benchmark::State &State) {
@@ -50,10 +47,7 @@ static void BM_DieRangeInfoInsertReverse(benchmark::State &State) {
     benchmark::DoNotOptimize(Parent);
   }
 }
-BENCHMARK(BM_DieRangeInfoInsertReverse)
-    ->Arg(1000)
-    ->Arg(10000)
-    ->Arg(100000);
+BENCHMARK(BM_DieRangeInfoInsertReverse)->Arg(1000)->Arg(10000)->Arg(100000);
 
 // Insert N non-overlapping ranges in random order.
 static void BM_DieRangeInfoInsertRandom(benchmark::State &State) {
@@ -73,10 +67,7 @@ static void BM_DieRangeInfoInsertRandom(benchmark::State &State) {
     benchmark::DoNotOptimize(Parent);
   }
 }
-BENCHMARK(BM_DieRangeInfoInsertRandom)
-    ->Arg(1000)
-    ->Arg(10000)
-    ->Arg(100000);
+BENCHMARK(BM_DieRangeInfoInsertRandom)->Arg(1000)->Arg(10000)->Arg(100000);
 
 // Measure single overlap detection after N-1 insertions.
 static void BM_DieRangeInfoOverlapDetection(benchmark::State &State) {
@@ -97,9 +88,6 @@ static void BM_DieRangeInfoOverlapDetection(benchmark::State &State) {
     benchmark::DoNotOptimize(It);
   }
 }
-BENCHMARK(BM_DieRangeInfoOverlapDetection)
-    ->Arg(1000)
-    ->Arg(10000)
-    ->Arg(100000);
+BENCHMARK(BM_DieRangeInfoOverlapDetection)->Arg(1000)->Arg(10000)->Arg(100000);
 
 BENCHMARK_MAIN();
