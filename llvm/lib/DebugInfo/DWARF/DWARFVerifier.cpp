@@ -80,35 +80,34 @@ DWARFVerifier::DieRangeInfo::insert(const DieRangeInfo &RI) {
   if (RI.Ranges.empty())
     return Children.end();
 
-  auto [It, Inserted] = Children.insert(RI);
-  if (!Inserted)
-    return Children.end(); // Exact duplicate, allowed.
+  // Use lower_bound to find the insertion point in O(log N), then check
+  // only the immediate neighbors for overlap. Since children are verified
+  // to be non-overlapping as they are inserted, only adjacent entries in
+  // the sorted set can intersect with a newly inserted entry.
+  auto It = Children.lower_bound(RI);
 
-  // Check only the immediate neighbors for intersection. Since children are
-  // verified to be non-overlapping as they are inserted, only adjacent entries
-  // in the sorted set can intersect with a newly inserted entry.
-
-  // Check immediate predecessor.
+  // Check the predecessor for overlap.
   if (It != Children.begin()) {
     auto Prev = std::prev(It);
-    if (Prev->intersects(RI)) {
-      Children.erase(It);
+    if (Prev->intersects(RI))
       return Prev;
-    }
   }
 
-  // Check immediate successor.
-  auto Next = std::next(It);
-  if (Next != Children.end()) {
-    if (Next->intersects(RI)) {
-      Children.erase(It);
-      return Next;
-    }
+  // Check the element at the lower_bound position for overlap or duplicate.
+  if (It != Children.end()) {
+    // We only override "smaller than", so "not smaller than" (RI >= It) plus the semantics
+    // of `lower_bound` (It >= RI) says this is exact duplicate (equivalent key), which is
+    // allowed and doesn't need reinsertion.
+    if (!(RI < *It))
+      return Children.end();
+    if (It->intersects(RI))
+      return It;
   }
 
+  // No overlap — insert with hint for O(1) amortized insertion.
+  Children.insert(It, RI);
   return Children.end();
 }
-
 bool DWARFVerifier::DieRangeInfo::contains(const DieRangeInfo &RHS) const {
   auto I1 = Ranges.begin(), E1 = Ranges.end();
   auto I2 = RHS.Ranges.begin(), E2 = RHS.Ranges.end();
