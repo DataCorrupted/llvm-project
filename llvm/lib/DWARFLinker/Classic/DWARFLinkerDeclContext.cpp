@@ -118,7 +118,7 @@ DeclContextTree::getChildDeclContext(DeclContext &Context, const DWARFDie &DIE,
 
   // For typedefs, include the referenced type's tag and name in the uniquing
   // key. Two typedefs with the same name (e.g. from preferred_name) but
-  // different DW_AT_type targets must get different DeclContexts, otherwise 
+  // different DW_AT_type targets must get different DeclContexts, otherwise
   // ODR deduplication can create self-referencing typedef cycles in the output
   // DWARF. This mirrors the parallel linker fix in the parallel linker:
   // https://github.com/llvm/llvm-project/pull/166767
