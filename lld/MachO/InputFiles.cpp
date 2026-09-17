@@ -901,13 +901,22 @@ void ObjFile::parseSymbols(ArrayRef<typename LP::section> sectionHeaders,
     // We populate subsections by repeatedly splitting the last (highest
     // address) subsection.
     llvm::stable_sort(symbolIndices, [&](uint32_t lhs, uint32_t rhs) {
+      if (nList[lhs].n_value != nList[rhs].n_value)
+        return nList[lhs].n_value < nList[rhs].n_value;
+      // An N_ALT_ENTRY symbol does not begin a subsection; it is recorded at an
+      // offset into whichever subsection is current. Order it after any symbol
+      // at the same address that does begin one, otherwise it is attached to the
+      // end of the preceding subsection and moves with the wrong atom.
+      bool lhsAltEntry = nList[lhs].n_desc & N_ALT_ENTRY;
+      bool rhsAltEntry = nList[rhs].n_desc & N_ALT_ENTRY;
+      if (lhsAltEntry != rhsAltEntry)
+        return rhsAltEntry;
       // Put extern weak symbols after other symbols at the same address so
       // that weak symbol coalescing works correctly. See
       // SymbolTable::addDefined() for details.
-      if (nList[lhs].n_value == nList[rhs].n_value &&
-          nList[lhs].n_type & N_EXT && nList[rhs].n_type & N_EXT)
+      if (nList[lhs].n_type & N_EXT && nList[rhs].n_type & N_EXT)
         return !(nList[lhs].n_desc & N_WEAK_DEF) && (nList[rhs].n_desc & N_WEAK_DEF);
-      return nList[lhs].n_value < nList[rhs].n_value;
+      return false;
     });
     for (size_t j = 0; j < symbolIndices.size(); ++j) {
       const uint32_t symIndex = symbolIndices[j];
